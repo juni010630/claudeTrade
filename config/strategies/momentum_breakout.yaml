@@ -1,0 +1,13 @@
+bb_period: 20
+bb_std: 2.0
+volume_multiplier: 1.5
+volume_lookback: 20
+atr_period: 14
+atr_tp_mult: 2.0
+atr_sl_mult: 1.0
+timeframe: "1h"
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+  - BNBUSDT

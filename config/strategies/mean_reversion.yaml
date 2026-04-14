@@ -1,0 +1,17 @@
+bb_period: 20
+bb_std: 2.0
+rsi_period: 14
+rsi_oversold: 30.0
+rsi_overbought: 70.0
+funding_long_max: 0.0001
+funding_short_min: 0.0001
+oi_cascade_threshold: 5.0
+atr_period: 14
+atr_tp_mult: 1.5
+atr_sl_mult: 1.0
+timeframe: "1h"
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+  - BNBUSDT

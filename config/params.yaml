@@ -1,0 +1,104 @@
+backtest:
+  start: '2024-01-01'
+  end: '2025-03-01'
+  initial_capital: 100000
+symbols:
+- BTCUSDT
+- ETHUSDT
+- SOLUSDT
+- BNBUSDT
+timeframes:
+- 1h
+- 4h
+- 1d
+primary_timeframe: 1h
+data:
+  exchange: binanceusdm
+  cache_dir: data/cache
+  lookback_bars: 300
+strategies:
+  momentum_breakout:
+    enabled: true
+    bb_period: 20
+    bb_std: 1.8
+    volume_multiplier: 1.8
+    volume_lookback: 20
+    atr_period: 14
+    atr_tp_mult: 3.0
+    atr_sl_mult: 0.8
+    timeframe: 1h
+  ema_cross:
+    enabled: true
+    fast_period: 12
+    slow_period: 18
+    daily_ema_period: 200
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    atr_period: 14
+    atr_tp_mult: 2.0
+    atr_sl_mult: 1.0
+    signal_tf: 1h
+    filter_tf: 1d
+  mean_reversion:
+    enabled: true
+    bb_period: 20
+    bb_std: 1.8
+    rsi_period: 14
+    rsi_oversold: 30.0
+    rsi_overbought: 75.0
+    funding_long_max: 0.0001
+    funding_short_min: 0.0001
+    oi_cascade_threshold: 5.0
+    atr_period: 14
+    atr_tp_mult: 2.0
+    atr_sl_mult: 0.7
+    timeframe: 1h
+regime:
+  adx_period: 14
+  adx_trending_threshold: 30.0
+  adx_ranging_threshold: 22.0
+  bb_period: 20
+  bb_std: 2.0
+  bb_width_lookback: 50
+  bb_width_squeeze_pct: 0.2
+  primary_tf: 1h
+scorer:
+  volume_ratio_threshold: 1.2
+  rsi_long_max: 60.0
+  rsi_short_min: 30.0
+  funding_long_max: 0.0003
+  funding_short_min: -0.0003
+  daily_ema_period: 200
+  tier_s_min_score: 6
+  tier_a_min_score: 3
+  tier_b_min_score: 2
+risk:
+  max_positions: 3
+  max_same_direction: 3
+  daily_drawdown_pause: -0.05
+  daily_drawdown_stop: -0.07
+  circuit_breaker_pause_losses: 5
+  circuit_breaker_stop_losses: 10
+  circuit_breaker_pause_hours: 48
+  correlation_block_threshold: 0.9
+  correlation_lookback: 100
+  risk_per_trade: 0.01
+leverage_tiers:
+  S:
+    leverage: 10
+    size_fraction: 0.3
+  A:
+    leverage: 7
+    size_fraction: 0.15
+  B:
+    leverage: 3
+    size_fraction: 0.08
+execution:
+  commission_maker: 0.0002
+  commission_taker: 0.0005
+  funding_interval_hours: 8
+  default_slippage_bps: 5.0
+walk_forward:
+  in_sample_months: 6
+  out_sample_months: 2

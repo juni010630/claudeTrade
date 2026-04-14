@@ -1,0 +1,67 @@
+2026-04-14 18:55:58,844 [INFO] live_trade — 파라미터 로드: config/params_best.yaml
+2026-04-14 18:55:58,845 [INFO] live_trade — 텔레그램 알림 활성화 (chat_id=7029175852)
+2026-04-14 18:55:58,849 [INFO] live_trade — 데모(Testnet) 모드로 실행
+2026-04-14 18:55:59,123 [INFO] live_trade — 잔고: USDT 5000.00
+2026-04-14 18:55:59,124 [INFO] live_trade — 엔진 초기화 완료 (전략 4개)
+2026-04-14 18:55:59,130 [INFO] live_trade — ============================================================
+2026-04-14 18:55:59,130 [INFO] live_trade — 라이브 트레이딩 시작
+2026-04-14 18:55:59,130 [INFO] live_trade — 심볼: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT']
+2026-04-14 18:55:59,130 [INFO] live_trade — 모드: DEMO
+2026-04-14 18:55:59,130 [INFO] live_trade — ============================================================
+2026-04-14 18:55:59,130 [INFO] data.live_feed — LiveFeed 시작: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'] | TF=['1h', '4h', '1d'] | lookback=300
+2026-04-14 18:55:59,130 [INFO] data.live_feed — 다음 봉 마감까지 246초 대기...
+2026-04-14 19:00:07,672 [INFO] live_trade — ─── 봉 #1 | 2026-04-14 10:00:00+00:00 ───
+2026-04-14 19:00:07,700 [INFO] live_trade — 자산: 10000.00 USDT | 포지션: 0개 | 일일DD: 0.00%
+2026-04-14 19:00:07,700 [INFO] data.live_feed — 다음 봉 마감까지 3597초 대기...
+2026-04-14 19:10:26,190 [INFO] live_trade — 파라미터 로드: config/params_best.yaml
+2026-04-14 19:10:26,191 [INFO] live_trade — 텔레그램 알림 활성화 (chat_id=7029175852)
+2026-04-14 19:10:26,195 [INFO] live_trade — 데모(Testnet) 모드로 실행
+2026-04-14 19:10:26,469 [INFO] live_trade — 잔고: USDT 5000.00 (엔진 초기 자본으로 사용)
+2026-04-14 19:10:26,469 [INFO] live_trade — 엔진 초기화 완료 (전략 4개)
+2026-04-14 19:10:26,476 [INFO] live_trade — ============================================================
+2026-04-14 19:10:26,476 [INFO] live_trade — 라이브 트레이딩 시작
+2026-04-14 19:10:26,476 [INFO] live_trade — 심볼: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT']
+2026-04-14 19:10:26,476 [INFO] live_trade — 모드: DEMO
+2026-04-14 19:10:26,476 [INFO] live_trade — ============================================================
+2026-04-14 19:10:26,476 [INFO] data.live_feed — LiveFeed 시작: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'] | TF=['1h', '4h', '1d'] | lookback=300
+2026-04-14 19:10:26,476 [INFO] data.live_feed — 다음 봉 마감까지 2979초 대기...
+2026-04-14 20:00:08,280 [INFO] live_trade — ─── 봉 #1 | 2026-04-14 11:00:00+00:00 ───
+2026-04-14 20:00:08,315 [INFO] live_trade — 자산: 5000.00 USDT | 포지션: 0개 | 일일DD: 0.00%
+2026-04-14 20:00:08,316 [INFO] data.live_feed — 다음 봉 마감까지 3597초 대기...
+2026-04-14 21:00:07,670 [INFO] live_trade — ─── 봉 #2 | 2026-04-14 12:00:00+00:00 ───
+2026-04-14 21:00:07,696 [INFO] live_trade — 자산: 5000.00 USDT | 포지션: 0개 | 일일DD: 0.00%
+2026-04-14 21:00:07,696 [INFO] data.live_feed — 다음 봉 마감까지 3597초 대기...
+2026-04-14 22:00:08,379 [INFO] live_trade — ─── 봉 #3 | 2026-04-14 13:00:00+00:00 ───
+2026-04-14 22:00:08,410 [INFO] live_trade — 자산: 5000.00 USDT | 포지션: 0개 | 일일DD: 0.00%
+2026-04-14 22:00:08,410 [INFO] data.live_feed — 다음 봉 마감까지 3597초 대기...
+2026-04-14 23:00:07,566 [INFO] live_trade — ─── 봉 #4 | 2026-04-14 14:00:00+00:00 ───
+2026-04-14 23:00:07,693 [INFO] execution.live_broker — 레버리지 설정: SOLUSDT x8
+2026-04-14 23:00:07,696 [INFO] execution.live_broker — [momentum_breakout] SOLUSDT buy 68.7400 @ 87.2800  (TP=94.0278 SL=85.9304)  dry=False
+2026-04-14 23:00:08,077 [WARNING] execution.live_broker — TP 등록 실패 SOLUSDT: binanceusdm {"code":-4120,"msg":"Order type not supported for this endpoint. Please use the Algo Order API endpoints instead."}
+2026-04-14 23:00:08,281 [WARNING] execution.live_broker — SL 등록 실패 SOLUSDT: binanceusdm {"code":-4120,"msg":"Order type not supported for this endpoint. Please use the Algo Order API endpoints instead."}
+2026-04-14 23:00:10,023 [INFO] live_trade — 자산: 5000.00 USDT | 포지션: 1개 | 일일DD: 0.00%
+2026-04-14 23:00:10,023 [INFO] data.live_feed — 다음 봉 마감까지 3595초 대기...
+2026-04-14 23:05:20,809 [INFO] live_trade — 파라미터 로드: config/params_best.yaml
+2026-04-14 23:05:20,810 [INFO] live_trade — 텔레그램 알림 활성화 (chat_id=7029175852)
+2026-04-14 23:05:20,815 [INFO] live_trade — 데모(Testnet) 모드로 실행
+2026-04-14 23:05:21,183 [INFO] live_trade — 잔고: USDT 4227.71 (엔진 초기 자본으로 사용)
+2026-04-14 23:05:21,184 [INFO] live_trade — 엔진 초기화 완료 (전략 4개)
+2026-04-14 23:05:21,189 [INFO] live_trade — ============================================================
+2026-04-14 23:05:21,189 [INFO] live_trade — 라이브 트레이딩 시작
+2026-04-14 23:05:21,189 [INFO] live_trade — 심볼: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT']
+2026-04-14 23:05:21,189 [INFO] live_trade — 모드: DEMO
+2026-04-14 23:05:21,189 [INFO] live_trade — ============================================================
+2026-04-14 23:05:21,189 [INFO] data.live_feed — LiveFeed 시작: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'] | TF=['1h', '4h', '1d'] | lookback=300
+2026-04-14 23:05:21,189 [INFO] data.live_feed — 다음 봉 마감까지 3284초 대기...
+2026-04-14 23:11:53,526 [INFO] live_trade — 파라미터 로드: config/params_best.yaml
+2026-04-14 23:11:53,526 [INFO] live_trade — 텔레그램 알림 활성화 (chat_id=7029175852)
+2026-04-14 23:11:53,530 [INFO] live_trade — 데모(Testnet) 모드로 실행
+2026-04-14 23:11:53,798 [INFO] live_trade — 잔고: USDT 4957.40 (엔진 초기 자본으로 사용)
+2026-04-14 23:11:53,799 [INFO] live_trade — 엔진 초기화 완료 (전략 4개)
+2026-04-14 23:11:53,805 [INFO] live_trade — ============================================================
+2026-04-14 23:11:53,805 [INFO] live_trade — 라이브 트레이딩 시작
+2026-04-14 23:11:53,805 [INFO] live_trade — 심볼: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT']
+2026-04-14 23:11:53,805 [INFO] live_trade — 모드: DEMO
+2026-04-14 23:11:53,805 [INFO] live_trade — ============================================================
+2026-04-14 23:11:53,805 [INFO] data.live_feed — LiveFeed 시작: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'] | TF=['1h', '4h', '1d'] | lookback=300
+2026-04-14 23:11:53,805 [INFO] data.live_feed — 다음 봉 마감까지 2891초 대기...

@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+data/cache/
+*.json
+!config/
+.DS_Store
+111%/
+live_trade.log*
+*.log
