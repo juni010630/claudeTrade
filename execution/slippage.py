@@ -10,14 +10,8 @@ class SlippageModel:
         self.default_bps = default_bps
 
     def apply(self, price: float, order_type: OrderType, direction: str) -> float:
-        """
-        시장가: 슬리피지 적용 (롱은 더 비싸게, 숏은 더 싸게 체결)
-        지정가: 슬리피지 없음
-        """
-        if order_type == OrderType.LIMIT:
-            return price
-        slip = price * self.default_bps / 10000
-        return price + slip if direction == "long" else price - slip
+        """원가를 그대로 반환. 슬리피지는 cost()로만 현금 차감 (이중 계상 방지)."""
+        return price
 
     def cost(self, notional: float, order_type: OrderType) -> float:
         if order_type == OrderType.LIMIT:

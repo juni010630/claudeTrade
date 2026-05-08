@@ -12,9 +12,9 @@ from strategies.base import BaseStrategy
 
 class EMACrossStrategy(BaseStrategy):
     """
-    필터: 1D EMA(200) 위면 롱만, 아래면 숏만 허용
-    진입: 1H EMA(9) / EMA(21) 크로스 + MACD 히스토그램 0선 전환 동시 충족
-    TP/SL: ATR(14) × 배수
+    필터: filter_tf EMA(daily_ema_period) 위면 롱만, 아래면 숏만 허용
+    진입: signal_tf EMA(fast) / EMA(slow) 크로스 + MACD 히스토그램 0선 전환 동시 충족
+    TP/SL: ATR(atr_period) × 배수
     """
 
     def __init__(self, config: dict | None = None) -> None:
@@ -71,6 +71,8 @@ class EMACrossStrategy(BaseStrategy):
 
             atr_s = calc_atr(df_signal, self.atr_period)
             curr_atr = float(atr_s.iloc[-1])
+            if curr_atr <= 0:
+                continue
             entry = float(df_signal["close"].iloc[-1])
 
             # 골든크로스 + MACD 히스토그램 양전환 + 일봉 EMA 위

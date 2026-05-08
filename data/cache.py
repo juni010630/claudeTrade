@@ -23,9 +23,10 @@ class ParquetCache:
         path = self._path(symbol, timeframe, data_type)
         if path.exists():
             existing = pd.read_parquet(path)
+            # 새 데이터가 기존 미완성 봉을 덮어쓰도록 keep="last"
             df = (
                 pd.concat([existing, df])
-                .drop_duplicates("timestamp")
+                .drop_duplicates("timestamp", keep="last")
                 .sort_values("timestamp")
                 .reset_index(drop=True)
             )

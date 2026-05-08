@@ -15,20 +15,24 @@ import argparse
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
 import ccxt
+import pandas as pd
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data.live_feed import LiveFeed
 from engine.backtest import BacktestEngine
+from portfolio import state_store
 from execution.commission import CommissionModel
 from execution.funding import FundingRateSimulator
 from execution.live_broker import LiveBroker
 from execution.notifier import TelegramNotifier
+from execution.sl_poller import SLPoller
 from execution.slippage import SlippageModel
 from metrics.report import MetricsReport
 from regime.detector import RegimeDetector
@@ -37,9 +41,7 @@ from risk.correlation import CorrelationFilter
 from risk.guards import RiskGuards
 from risk.position_sizer import PositionSizer
 from signals.scorer import ConfluenceScorer
-from strategies.donchian_breakout import DonchianBreakoutStrategy
-from strategies.mean_reversion import MeanReversionStrategy
-from strategies.momentum_breakout import MomentumBreakoutStrategy
+from strategies.ema_cross import EMACrossStrategy
 from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
 
 # ── 로깅 ──────────────────────────────────────────────────────────
@@ -54,7 +56,7 @@ logging.basicConfig(
 logger = logging.getLogger("live_trade")
 
 # ── 기본 파라미터 파일 ────────────────────────────────────────────
-DEFAULT_PARAMS = "config/params_best.yaml"
+DEFAULT_PARAMS = "config/final_v13_eth.yaml"
 
 
 # ── ccxt Exchange 생성 ────────────────────────────────────────────
@@ -92,21 +94,16 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
     rg         = p.get("regime", {})
     sc         = p.get("scorer", {})
 
+    strategy_map = {
+        "ema_cross":          EMACrossStrategy,
+        "multi_tf_breakout":  MultiTFBreakoutStrategy,
+    }
     strategies = []
-    for key, cls in [
-        ("momentum_breakout", MomentumBreakoutStrategy),
-        ("multi_tf_breakout", MultiTFBreakoutStrategy),
-        ("mean_reversion",    MeanReversionStrategy),
-    ]:
+    for key, cls in strategy_map.items():
         cfg = p.get("strategies", {}).get(key, {})
         if cfg.get("enabled", True):
             cfg["symbols"] = symbols
             strategies.append(cls(cfg))
-
-    don_cfg = p.get("strategies", {}).get("donchian_breakout", {})
-    if don_cfg.get("enabled", True):
-        don_cfg["symbols"] = symbols
-        strategies.append(DonchianBreakoutStrategy(don_cfg))
 
     cap = initial_capital if initial_capital is not None else p.get("backtest", {}).get("initial_capital", 10_000)
     return BacktestEngine(
@@ -154,12 +151,20 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         position_sizer=PositionSizer(
             risk_per_trade=r.get("risk_per_trade", 0.010),
             tier_config=p.get("leverage_tiers"),
+            max_notional_usd=r.get("max_notional_usd"),
         ),
         broker=broker,
         funding_simulator=FundingRateSimulator(
             interval_hours=e.get("funding_interval_hours", 8)
         ),
+        max_hold_hours=p.get("engine", {}).get("max_hold_hours"),
+        breakeven_trigger_r=p.get("engine", {}).get("breakeven_trigger_r"),
+        trailing_r_mult=p.get("engine", {}).get("trailing_r_mult"),
+        strategy_min_score=p.get("strategy_min_score"),
+        strategy_block_hours=p.get("strategy_block_hours"),
+        strategy_block_symbols=p.get("strategy_block_symbols"),
         notifier=notifier,
+        trade_log_path="trades.csv",
     )
 
 
@@ -173,6 +178,9 @@ def main() -> None:
                         help="한 번만 실행하고 종료 (연결 테스트용)")
     parser.add_argument("--no-demo",   action="store_true",
                         help="실계정 사용 (주의)")
+    parser.add_argument("--sl-poll-sec", type=int, default=None,
+                        help="SL 폴러 주기(초). 기본: demo=300(5분), live=0(비활성). "
+                             "0이면 수동 비활성. 실계정은 STOP_MARKET이 거래소에서 동작하므로 폴러 불필요.")
     args = parser.parse_args()
 
     # .env 로드 (python-dotenv 없어도 직접 파싱)
@@ -188,8 +196,8 @@ def main() -> None:
     params_path = Path(args.params)
     if not params_path.exists():
         # 최적 파라미터가 아직 없으면 기본 v2 사용
-        logger.warning("%s 없음 → config/params_v2.yaml 사용", args.params)
-        params_path = Path("config/params_v2.yaml")
+        logger.warning("%s 없음 → config/final_v13_eth.yaml 사용", args.params)
+        params_path = Path("config/final_v13_eth.yaml")
 
     with open(params_path) as f:
         params = yaml.safe_load(f)
@@ -213,8 +221,8 @@ def main() -> None:
     usdt = None
     try:
         balance = exchange.fetch_balance()
-        usdt    = float(balance.get("USDT", {}).get("free", 0) or 0)
-        logger.info("잔고: USDT %.2f (엔진 초기 자본으로 사용)", usdt)
+        usdt    = float(balance.get("USDT", {}).get("total", 0) or 0)
+        logger.info("잔고: USDT %.2f (total, 엔진 초기 자본으로 사용)", usdt)
     except Exception as e:
         logger.error("잔고 조회 실패: %s", e)
         if not dry_run:
@@ -223,6 +231,48 @@ def main() -> None:
     # 엔진 생성 — 실제 잔고를 초기 자본으로 주입 (백테스트 값 무시)
     engine = build_engine(params, broker, notifier=notifier, initial_capital=usdt)
     broker.equity_provider = lambda: engine.tracker.snapshot().equity
+
+    # state 복원 (이전 크래시 시 포지션/equity 유지)
+    saved = state_store.load()
+    if saved is not None and saved.positions:
+        # 거래소에 실제로 열린 포지션과 교차 검증
+        exchange_syms = broker.fetch_open_symbols()
+        restored = 0
+        skipped_unreal = 0.0
+        for sym, pos in list(saved.positions.items()):
+            if sym in exchange_syms:
+                engine.tracker.state.positions[sym] = pos
+                restored += 1
+            else:
+                logger.warning("state 복원 skip: %s (거래소에 포지션 없음)", sym)
+                skipped_unreal += pos.unrealized_pnl
+        if restored:
+            # cash = total_balance - unrealized_pnl (이중 계산 방지)
+            # 거래소 실시간 unrealized PnL 조회 (stale state 방지)
+            if usdt is not None and usdt > 0:
+                live_unrealized = 0.0
+                try:
+                    for pos_data in exchange.fetch_positions():
+                        if float(pos_data.get("contracts") or 0) != 0:
+                            live_unrealized += float(pos_data.get("unrealizedPnl") or 0)
+                except Exception:
+                    live_unrealized = sum(
+                        p.unrealized_pnl for p in engine.tracker.state.positions.values()
+                    )
+                engine.tracker.state.cash = usdt - live_unrealized
+            else:
+                engine.tracker.state.cash = saved.cash
+            engine.tracker.state.equity = usdt if usdt else saved.equity
+            engine.tracker.state.daily_start_equity = saved.daily_start_equity
+            # 같은 날 재시작 시 reset_daily() 건너뛰도록 _last_day 설정
+            engine._last_day = pd.Timestamp.now(tz="UTC")
+            logger.info("state 복원 완료: %d 포지션, cash=%.2f (거래소 잔고), daily_start=%.2f",
+                        restored, engine.tracker.state.cash, saved.daily_start_equity)
+        else:
+            logger.info("복원할 포지션 없음 (거래소와 불일치) → 신규 시작")
+    else:
+        logger.info("저장된 state 없음 → 신규 시작")
+
     logger.info("엔진 초기화 완료 (전략 %d개)", len(engine.strategies))
 
     # LiveFeed 생성
@@ -234,6 +284,7 @@ def main() -> None:
         primary_tf=params.get("primary_timeframe", "1h"),
         lookback=params.get("data", {}).get("lookback_bars", 300),
         demo=demo,
+        notifier=notifier,
     )
 
     logger.info("=" * 60)
@@ -242,6 +293,39 @@ def main() -> None:
     logger.info("모드: %s%s", "DEMO" if demo else "LIVE", " | DRY-RUN" if dry_run else "")
     logger.info("=" * 60)
 
+    # 시작 알림
+    if notifier and notifier.enabled:
+        mode = "DEMO" if demo else "LIVE"
+        if dry_run:
+            mode += " | DRY-RUN"
+        strats = [s.name for s in engine.strategies]
+        notifier.notify_info(
+            f"🚀 <b>봇 시작</b>\n"
+            f"모드: {mode}\n"
+            f"심볼: {', '.join(symbols)}\n"
+            f"전략: {', '.join(strats)}\n"
+            f"잔고: ${usdt:,.2f}"
+        )
+
+    # ── SL 폴러 (testnet 전용, 5분 간격) + engine 접근 직렬화용 lock ──
+    # 실계정(Live)은 STOP_MARKET이 거래소 측에서 동작하므로 폴링 불필요.
+    # Testnet은 STOP_MARKET 불가(-4120) → 폴러 필수.
+    engine_lock = threading.Lock()
+    sl_poller = None
+    if args.sl_poll_sec is None:
+        poll_sec = 300 if demo else 0  # demo 기본 5분, live 기본 비활성
+    else:
+        poll_sec = args.sl_poll_sec
+    if poll_sec > 0 and not dry_run:
+        sl_poller = SLPoller(
+            engine=engine, broker=broker, exchange=exchange,
+            interval_sec=poll_sec, tf="5m", lock=engine_lock,
+        )
+        sl_poller.start()
+        logger.info("SL poller: %ds 간격 (testnet STOP_MARKET 대체)", poll_sec)
+    elif not demo:
+        logger.info("SL poller: 비활성 (실계정은 STOP_MARKET을 거래소가 처리)")
+
     # ── 실행 루프 ──
     bar_count = 0
     try:
@@ -249,8 +333,9 @@ def main() -> None:
             # 즉시 한 번만 실행 (연결 테스트)
             logger.info("[snap-now] 즉시 스냅샷 실행...")
             snap = feed.snapshot_now()
-            engine._process_bar(snap)
-            state = engine.tracker.snapshot()
+            with engine_lock:
+                engine._process_bar(snap)
+                state = engine.tracker.snapshot()
             logger.info(
                 "snap-now 완료 | 자산 %.2f | 포지션 %d개",
                 state.equity, state.open_position_count,
@@ -261,18 +346,53 @@ def main() -> None:
                 bar_count += 1
                 logger.info("─── 봉 #%d | %s ───", bar_count, snapshot.timestamp)
 
-                engine._process_bar(snapshot)
-                state = engine.tracker.snapshot()
+                # stale 데이터 방어: snapshot이 2봉 이상 지연이면 시그널 무시 (청산만 처리)
+                staleness = (pd.Timestamp.now(tz="UTC") - snapshot.timestamp).total_seconds()
+                if staleness > 7200:  # 2시간 이상 지연
+                    logger.warning("stale 데이터 감지 (%.0f초 지연) — 이 봉 건너뜀", staleness)
+                    continue
+
+                with engine_lock:
+                    engine._process_bar(snapshot)
+                    state = engine.tracker.snapshot()
 
                 logger.info(
                     "자산: %.2f USDT | 포지션: %d개 | 일일DD: %.2f%%",
                     state.equity,
                     state.open_position_count,
-                    (state.equity / state.daily_start_equity - 1) * 100,
+                    state.daily_pnl_pct * 100,
                 )
 
-                # 거래 내역 주기적 출력 (10봉마다)
+                # state 디스크 저장 (매 봉 — 크래시 복구용)
+                state_store.save(state)
+
+                # 매 봉 텔레그램 알림
+                if notifier and notifier.enabled:
+                    pos_info = ""
+                    for sym, pos in state.positions.items():
+                        pnl_pct = pos.unrealized_pnl / state.equity * 100 if state.equity > 0 else 0
+                        pos_info += f"\n  {sym} {pos.direction} {pnl_pct:+.1f}%"
+                    notifier.notify_info(
+                        f"#{bar_count} | {snapshot.timestamp.strftime('%m-%d %H:%M')} UTC\n"
+                        f"잔고: ${state.equity:,.2f} | DD: {state.daily_pnl_pct*100:+.1f}%\n"
+                        f"포지션: {state.open_position_count}개{pos_info}"
+                    )
+
+                # 잔고 대조 (10봉마다)
                 if bar_count % 10 == 0:
+                    try:
+                        bal = exchange.fetch_balance()
+                        real_usdt = float(bal.get("USDT", {}).get("total", 0) or 0)
+                        drift_pct = abs(real_usdt - state.equity) / state.equity * 100 if state.equity > 0 else 0
+                        logger.info("잔고 대조: 거래소=%.2f tracker=%.2f (괴리 %.1f%%)", real_usdt, state.equity, drift_pct)
+                        if drift_pct > 5:
+                            msg = f"⚠️ 잔고 괴리 {drift_pct:.1f}%\n거래소: {real_usdt:.2f}\ntracker: {state.equity:.2f}"
+                            logger.warning(msg)
+                            if notifier and notifier.enabled:
+                                notifier.notify_info(msg)
+                    except Exception as e:
+                        logger.warning("잔고 대조 실패: %s", e)
+
                     trades = engine.ledger.records
                     closed = len(trades)
                     if closed:
@@ -283,18 +403,62 @@ def main() -> None:
                             closed, 100 * wins / closed, total_pnl,
                         )
 
+                # heartbeat (24봉 = 24시간마다 텔레그램 알림)
+                if bar_count % 24 == 0 and notifier and notifier.enabled:
+                    trades = engine.ledger.records
+                    hb = (f"💓 Heartbeat #{bar_count // 24}d\n"
+                          f"자산: {state.equity:.2f} USDT\n"
+                          f"포지션: {state.open_position_count}개\n"
+                          f"누적 거래: {len(trades)}건")
+                    try:
+                        notifier.notify_info(hb)
+                    except Exception:
+                        pass
+
     except KeyboardInterrupt:
-        logger.info("사용자 중단 (Ctrl+C)")
+        shutdown_reason = "사용자 중단 (Ctrl+C)"
+        shutdown_emoji = "⏹"
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()[-500:]
+        shutdown_reason = f"에러: {type(e).__name__}: {str(e)[:200]}"
+        shutdown_emoji = "🔥"
         logger.exception("예상치 못한 오류: %s", e)
-        raise
+    else:
+        shutdown_reason = "정상 종료"
+        shutdown_emoji = "⏹"
     finally:
+        if sl_poller is not None:
+            sl_poller.stop()
+        # 종료 전 state 저장
+        state_store.save(engine.tracker.snapshot())
+        logger.info("종료 전 state 저장 완료")
         # 최종 성과 출력
         report = MetricsReport.from_run(engine.equity_curve, engine.ledger)
+        state = engine.tracker.snapshot()
+        trades = engine.ledger.records
         logger.info("=" * 60)
+        logger.info("종료 사유: %s", shutdown_reason)
         logger.info("최종 결과 | 총수익 %.1f%% | Sharpe %.3f | MDD %.1f%%",
                     report.total_return_pct, report.sharpe or 0, report.max_drawdown or 0)
         logger.info("=" * 60)
+        # 텔레그램 종료 알림 (모든 종료 사유)
+        if notifier and notifier.enabled:
+            msg = (
+                f"{shutdown_emoji} <b>봇 종료</b>\n"
+                f"사유: {shutdown_reason}\n"
+                f"잔고: ${state.equity:,.2f}\n"
+                f"포지션: {state.open_position_count}개\n"
+                f"누적 거래: {len(trades)}건\n"
+                f"총수익: {report.total_return_pct:+.1f}%"
+            )
+            if shutdown_emoji == "🔥":
+                msg += f"\n<pre>{tb}</pre>"
+            try:
+                notifier.notify_info(msg)
+                time.sleep(1)  # 텔레그램 전송 완료 대기
+            except Exception:
+                logger.warning("종료 알림 전송 실패")
 
 
 if __name__ == "__main__":

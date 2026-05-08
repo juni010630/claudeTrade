@@ -1,6 +1,9 @@
 """컨플루언스 점수 계산기."""
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
 import pandas as pd
 
 from data.schemas import MarketSnapshot
@@ -9,10 +12,15 @@ from indicators.momentum import rsi as calc_rsi
 from regime.models import RegimeState
 from signals.models import LeverageTier, Signal, SignalScore
 
+if TYPE_CHECKING:
+    from strategies.ml_filter import MLSignalFilter
+
+logger = logging.getLogger(__name__)
+
 
 class ConfluenceScorer:
     """
-    7개 항목 각 +1점, 총점으로 레버리지 등급 결정.
+    7개 항목 각 +1점 + ML 보너스(0~2점), 총점으로 레버리지 등급 결정.
     등급 기준 점수는 params.yaml scorer 섹션에서 제어합니다.
     """
 
@@ -29,6 +37,10 @@ class ConfluenceScorer:
         tier_a_min_score: int = 3,
         tier_b_min_score: int = 2,
         tier_c_min_score: int = 1,    # 최소 신호 탐색
+        ml_filter: "MLSignalFilter | None" = None,
+        ml_bonus_threshold_1: float = 0.6,   # clf_prob >= 0.6 → +1점
+        ml_bonus_threshold_2: float = 0.75,  # clf_prob >= 0.75 → +2점
+        rsi_neutral_penalty: tuple[float, float] | None = None,  # (lo, hi) → RSI가 이 범위면 -1점
     ) -> None:
         self.volume_ratio_threshold = volume_ratio_threshold
         self.rsi_long_max = rsi_long_max
@@ -41,6 +53,10 @@ class ConfluenceScorer:
         self.tier_a_min_score  = tier_a_min_score
         self.tier_b_min_score  = tier_b_min_score
         self.tier_c_min_score  = tier_c_min_score
+        self._ml_filter = ml_filter
+        self._ml_bonus_t1 = ml_bonus_threshold_1
+        self._ml_bonus_t2 = ml_bonus_threshold_2
+        self._rsi_neutral_penalty = rsi_neutral_penalty
 
     def _map_tier(self, total: int) -> LeverageTier:
         if total >= self.tier_ss_min_score:
@@ -127,6 +143,35 @@ class ConfluenceScorer:
             pts["tf_4h"] = 1 if aligned_4h else 0
         else:
             pts["tf_4h"] = 0
+
+        # 8. ML 보너스 (선택적 — ml_filter 설정 시만)
+        ml_bonus = 0
+        if self._ml_filter is not None:
+            try:
+                from strategies.ml_filter import compute_features
+                bars_1h = snapshot.bars.get(sym, {}).get("1h", pd.DataFrame())
+                bars_4h = snapshot.bars.get(sym, {}).get("4h", pd.DataFrame())
+                bars_1d = snapshot.bars.get(sym, {}).get("1d", pd.DataFrame())
+                if not bars_1h.empty and len(bars_1h) > 200:
+                    feat = compute_features(bars_1h, bars_4h, bars_1d, len(bars_1h) - 1)
+                    if feat is not None:
+                        pred = self._ml_filter.predict(feat)
+                        clf_prob = pred["clf_prob"]
+                        if clf_prob >= self._ml_bonus_t2:
+                            ml_bonus = 2
+                        elif clf_prob >= self._ml_bonus_t1:
+                            ml_bonus = 1
+            except Exception:
+                pass  # ML 실패 시 보너스 0으로 진행
+        pts["ml_bonus"] = ml_bonus
+
+        # 9. RSI 중립 구간 페널티 (선택적)
+        if self._rsi_neutral_penalty is not None:
+            lo, hi = self._rsi_neutral_penalty
+            if not bars_1h.empty and len(bars_1h) >= 15:
+                rsi_val = float(calc_rsi(bars_1h).iloc[-1])
+                if lo <= rsi_val <= hi:
+                    pts["rsi_neutral_penalty"] = -1
 
         total = sum(pts.values())
         signal.raw_points = pts

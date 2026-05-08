@@ -20,20 +20,15 @@ def test_taker_commission():
     assert abs(cost - 5.0) < 1e-9
 
 
-def test_slippage_market_long():
+def test_slippage_apply_is_passthrough():
+    """apply()는 원가 반환 (이중 계상 방지). 현금 비용은 cost()만 적용."""
     model = SlippageModel(default_bps=10)
-    fill_price = model.apply(30000, OrderType.MARKET, "long")
-    assert fill_price > 30000
+    assert model.apply(30000, OrderType.MARKET, "long") == 30000
+    assert model.apply(30000, OrderType.MARKET, "short") == 30000
+    assert model.apply(30000, OrderType.LIMIT, "long") == 30000
 
 
-def test_slippage_market_short():
+def test_slippage_cost():
     model = SlippageModel(default_bps=10)
-    fill_price = model.apply(30000, OrderType.MARKET, "short")
-    assert fill_price < 30000
-
-
-def test_no_slippage_limit():
-    model = SlippageModel(default_bps=10)
-    fill_price = model.apply(30000, OrderType.LIMIT, "long")
-    assert fill_price == 30000
+    assert abs(model.cost(10000, OrderType.MARKET) - 10.0) < 1e-9
     assert model.cost(10000, OrderType.LIMIT) == 0.0

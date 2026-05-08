@@ -20,7 +20,7 @@ def recovery_time(equity: pd.Series) -> pd.Timedelta | None:
     rolling_max = equity.cummax()
     dd = (equity - rolling_max) / rolling_max.replace(0, float("nan"))
     trough_idx = dd.idxmin()
-    if trough_idx is None:
+    if trough_idx is None or pd.isna(trough_idx):
         return None
     after_trough = equity[trough_idx:]
     peak_val = rolling_max[trough_idx]

@@ -67,14 +67,14 @@ class TelegramNotifier:
         equity: float,
     ) -> None:
         arrow = "🟢 LONG 진입" if direction == "long" else "🔴 SHORT 진입"
-        notional = size_usd * leverage
+        margin = size_usd / leverage if leverage > 0 else size_usd
         equity_pct = (size_usd / equity * 100) if equity > 0 else 0.0
         text = (
             f"<b>{arrow}</b>\n"
             f"종목: <code>{symbol}</code>\n"
             f"가격: <code>{fill_price:,.4f}</code>\n"
-            f"마진: <code>${size_usd:,.2f}</code> (자본의 {equity_pct:.1f}%)\n"
-            f"노셔널: <code>${notional:,.2f}</code>  레버리지: <b>x{leverage}</b>\n"
+            f"노셔널: <code>${size_usd:,.2f}</code> (자본의 {equity_pct:.1f}%)  레버리지: <b>x{leverage}</b>\n"
+            f"마진: <code>${margin:,.2f}</code>\n"
             f"TP: <code>{tp_price:,.4f}</code> / SL: <code>{sl_price:,.4f}</code>\n"
             f"전략: {strategy} | Tier <b>{tier}</b> (점수 {score})\n"
             f"잔고: ${equity:,.2f}"

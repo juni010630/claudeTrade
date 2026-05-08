@@ -130,7 +130,9 @@ class MultiTFBreakoutStrategy(BaseStrategy):
                         timestamp=snapshot.timestamp,
                     ))
 
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).debug("multi_tf %s 시그널 생성 실패: %s", sym, e)
                 continue
 
         return signals

@@ -1,0 +1,127 @@
+backtest:
+  end: '2026-04-14'
+  initial_capital: 100
+  start: '2022-01-01'
+data:
+  cache_dir: data/cache
+  exchange: binanceusdm
+  lookback_bars: 300
+engine:
+  breakeven_trigger_r: null
+  max_hold_hours: 336
+  trailing_r_mult: null
+execution:
+  commission_maker: 0.0002
+  commission_taker: 0.0005
+  default_slippage_bps: 5.0
+  funding_interval_hours: 8
+leverage_tiers:
+  A:
+    leverage: 10
+    size_fraction: 0.1
+  B:
+    leverage: 1
+    size_fraction: 0.01
+  C:
+    leverage: 1
+    size_fraction: 0.01
+  S:
+    leverage: 25
+    size_fraction: 0.22
+  SS:
+    leverage: 40
+    size_fraction: 0.3
+primary_timeframe: 1h
+regime:
+  adx_period: 14
+  adx_ranging_threshold: 12.0
+  adx_trending_threshold: 30.0
+  bb_period: 20
+  bb_std: 2.0
+  bb_width_lookback: 50
+  bb_width_squeeze_pct: 0.2
+  primary_tf: 1h
+risk:
+  circuit_breaker_pause_hours: 48
+  circuit_breaker_pause_losses: 5
+  circuit_breaker_stop_losses: 10
+  correlation_block_threshold: 0.8
+  correlation_lookback: 100
+  daily_drawdown_pause: -0.04
+  daily_drawdown_stop: -0.1
+  max_positions: 7
+  max_same_direction: 5
+  risk_per_trade: 0.099
+scorer:
+  daily_ema_period: 200
+  funding_long_max: 0.0003
+  funding_short_min: -0.0003
+  rsi_long_max: 70.0
+  rsi_short_min: 40.0
+  tier_a_min_score: 3
+  tier_b_min_score: 99
+  tier_c_min_score: 99
+  tier_s_min_score: 4
+  tier_ss_min_score: 5
+  volume_ratio_threshold: 1.8
+strategies:
+  ema_cross:
+    atr_period: 14
+    atr_sl_mult: 1.8
+    atr_tp_mult: 3.5
+    daily_ema_period: 150
+    enabled: true
+    fast_period: 8
+    filter_tf: 4h
+    macd_fast: 12
+    macd_signal: 7
+    macd_slow: 21
+    signal_tf: 1h
+    slow_period: 21
+  multi_tf_breakout:
+    atr_period: 14
+    atr_sl_mult: 1.8
+    atr_tp_mult: 4.0
+    bb_period: 25
+    bb_std_1h: 2.2
+    bb_std_4h: 2.0
+    confirm_tf: 4h
+    daily_ema_period: 150
+    enabled: true
+    filter_tf: 1d
+    rsi_long_min: 55.0
+    rsi_period: 10
+    rsi_short_max: 45.0
+    signal_tf: 1h
+    volume_lookback: 20
+    volume_multiplier: 1.8
+strategy_block_hours:
+  ema_cross:
+  - 6
+  - 7
+  - 8
+  - 9
+  - 16
+  - 19
+  - 21
+  - 23
+  multi_tf_breakout:
+  - 6
+  - 7
+  - 8
+  - 9
+  - 16
+  - 19
+  - 21
+  - 23
+symbols:
+- ETHUSDT
+- BTCUSDT
+- DOGEUSDT
+- ARBUSDT
+- FILUSDT
+- ADAUSDT
+timeframes:
+- 1h
+- 4h
+- 1d

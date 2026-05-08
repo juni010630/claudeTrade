@@ -24,17 +24,27 @@ class BacktestBroker:
         """
         fill_price = self.slippage.apply(order.price, order.order_type, order.direction)
 
-        # 지정가 주문이 현재 봉 범위 밖이면 시장가로 대체
+        # 지정가 주문 체결 가능성 체크
+        # LONG LIMIT: 시장가가 limit 이하로 내려와야 체결 (bar_low <= limit)
+        # SHORT LIMIT: 시장가가 limit 이상으로 올라와야 체결 (bar_high >= limit)
+        # 미도달 시 시장가 폴백(봉 종가) → taker 수수료/슬리피지로 재계산
+        effective_type = order.order_type
         if order.order_type == OrderType.LIMIT and current_bar is not None:
             bar_low = float(current_bar["low"])
             bar_high = float(current_bar["high"])
-            if order.direction == "long" and fill_price > bar_high:
-                fill_price = float(current_bar["close"])
-            elif order.direction == "short" and fill_price < bar_low:
-                fill_price = float(current_bar["close"])
+            fallback = (
+                (order.direction == "long" and fill_price < bar_low)
+                or (order.direction == "short" and fill_price > bar_high)
+            )
+            if fallback:
+                effective_type = OrderType.MARKET
+                # 시장가 슬리피지를 종가에 적용
+                fill_price = self.slippage.apply(
+                    float(current_bar["close"]), OrderType.MARKET, order.direction
+                )
 
-        commission = self.commission.calculate(order.size_usd, order.order_type)
-        slip_cost = self.slippage.cost(order.size_usd, order.order_type)
+        commission = self.commission.calculate(order.size_usd, effective_type)
+        slip_cost = self.slippage.cost(order.size_usd, effective_type)
 
         return Fill(
             order=order,

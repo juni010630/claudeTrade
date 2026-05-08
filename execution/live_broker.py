@@ -63,33 +63,37 @@ class LiveBroker:
     #   - SL: 거래소 주문 불가 → 엔진이 매 봉 close 에서 폴링하여 market_close() 호출
     # 라이브 계정에서는 STOP_MARKET 이 정상 동작하므로 그때만 폴백으로 시도.
     def _place_tp_sl(self, order: Order, entry_price: float, qty: float) -> None:
-        """진입 후 TP 지정가 주문 등록. SL 은 엔진 폴링에 위임."""
+        """진입 후 TP/SL 주문 등록. 실제 fill_price 기준으로 가격 보정."""
         close_side = "sell" if order.direction == "long" else "buy"
+        # fill_price와 order.price 차이만큼 TP/SL 보정 (슬리피지 반영)
+        shift = entry_price - order.price
+        tp = order.tp_price + shift if order.tp_price > 0 else 0
+        sl = order.sl_price + shift if order.sl_price > 0 else 0
 
         # ── TP: LIMIT reduceOnly ─────────────────────────────────────
-        if order.tp_price > 0:
+        if tp > 0:
             try:
                 if not self.dry_run:
                     self.exchange.create_order(
-                        order.symbol, "limit", close_side, float(qty), float(order.tp_price),
-                        {"reduceOnly": "true"},
+                        order.symbol, "limit", close_side, float(qty), float(tp),
+                        {"reduceOnly": True},
                     )
-                logger.info("TP(LIMIT reduceOnly) 등록: %s @%.4f", order.symbol, order.tp_price)
+                logger.info("TP(LIMIT reduceOnly) 등록: %s @%.4f", order.symbol, tp)
             except Exception as e:
                 logger.warning("TP 등록 실패 %s: %s", order.symbol, e)
 
         # ── SL: 거래소 STOP_MARKET 시도, 실패 시 엔진 폴링 ──────────────
-        if order.sl_price > 0:
+        if sl > 0:
             try:
                 if not self.dry_run:
                     self.exchange.create_order(
                         order.symbol, "STOP_MARKET", close_side, float(qty),
-                        None, {"stopPrice": float(order.sl_price), "reduceOnly": "true"},
+                        None, {"stopPrice": float(sl), "reduceOnly": "true"},
                     )
-                    logger.info("SL(STOP_MARKET) 등록: %s @%.4f", order.symbol, order.sl_price)
+                    logger.info("SL(STOP_MARKET) 등록: %s @%.4f", order.symbol, sl)
             except Exception as e:
-                logger.info("SL 거래소 등록 불가 (엔진 폴링 위임): %s @%.4f  (%s)",
-                            order.symbol, order.sl_price, type(e).__name__)
+                logger.error("SL 거래소 등록 실패: %s @%.4f — %s: %s",
+                             order.symbol, sl, type(e).__name__, e)
 
     # ── 메인: 주문 실행 ──────────────────────────────────────────────
     def submit(self, order: Order, current_bar: Optional[pd.Series] = None) -> Fill:
@@ -111,8 +115,12 @@ class LiveBroker:
         try:
             market = self.exchange.market(symbol)
             qty = self.exchange.amount_to_precision(symbol, qty)
+            min_qty = market.get("limits", {}).get("amount", {}).get("min")
+            if min_qty is not None and float(qty) < float(min_qty):
+                logger.warning("qty %s < 최소 %s (%s), 최소값 사용", qty, min_qty, symbol)
+                qty = min_qty
         except Exception:
-            qty = round(qty, 3)
+            qty = round(qty, 6)
 
         logger.info(
             "[%s] %s %s %.4f @ %.4f  (TP=%.4f SL=%.4f)  dry=%s",
@@ -124,22 +132,43 @@ class LiveBroker:
             fill = Fill(
                 order=order,
                 fill_price=price,
-                commission=size_usd * 0.0005,
-                slippage_cost=size_usd * 0.0005,
+                commission=self.commission.calculate(size_usd, OrderType.MARKET),
+                slippage_cost=self.slippage.cost(size_usd, OrderType.MARKET),
                 timestamp=pd.Timestamp.now(tz="UTC"),
             )
             self._notify_entry(order, price)
             return fill
 
-        # 실제 시장가 주문
-        try:
-            result = self.exchange.create_order(symbol, "market", side, qty)
-        except ccxt.InsufficientFunds as e:
-            logger.error("잔고 부족: %s", e)
-            raise
-        except ccxt.ExchangeError as e:
-            logger.error("거래소 오류: %s", e)
-            raise
+        # 실제 시장가 주문 (재시도 포함, 이중 주문 방지)
+        result = None
+        for _attempt in range(3):
+            try:
+                result = self.exchange.create_order(symbol, "market", side, qty)
+                break
+            except ccxt.InsufficientFunds as e:
+                logger.error("잔고 부족: %s", e)
+                raise
+            except ccxt.RateLimitExceeded as e:
+                logger.warning("Rate limit, 재시도 %d/3: %s", _attempt + 1, e)
+                time.sleep(2 ** _attempt)
+            except ccxt.NetworkError as e:
+                logger.warning("네트워크 오류, 재시도 %d/3: %s", _attempt + 1, e)
+                # 이미 체결됐을 수 있으므로 포지션 확인
+                try:
+                    if symbol in self.fetch_open_symbols():
+                        logger.info("네트워크 오류지만 포지션 존재 확인 — 체결된 것으로 간주: %s", symbol)
+                        trades = self.exchange.fetch_my_trades(symbol, limit=3)
+                        if trades:
+                            result = {"average": float(trades[-1]["price"]), "fee": trades[-1].get("fee")}
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+            except ccxt.ExchangeError as e:
+                logger.error("거래소 오류: %s", e)
+                raise
+        if result is None:
+            raise ccxt.NetworkError("3회 재시도 후에도 주문 실패")
 
         fill_price = float(result.get("average") or result.get("price") or price)
         fee_info   = result.get("fee") or {}
@@ -167,7 +196,7 @@ class LiveBroker:
             equity = float(self.equity_provider()) if self.equity_provider else 0.0
             tier_name = getattr(order.signal_score, "tier", None)
             tier_str = tier_name.name if hasattr(tier_name, "name") else str(tier_name)
-            score_val = int(getattr(order.signal_score, "score", 0) or 0)
+            score_val = int(getattr(order.signal_score, "total", 0) or 0)
             self.notifier.notify_entry(
                 symbol=order.symbol,
                 direction=order.direction,
@@ -184,6 +213,17 @@ class LiveBroker:
         except Exception as e:
             logger.warning("entry 알림 실패: %s", e)
 
+    def fetch_recent_fill_price(self, symbol: str) -> float | None:
+        """최근 체결 내역에서 해당 심볼의 마지막 체결가 조회.
+        TP LIMIT 등 거래소 측 체결을 tracker에 정확히 반영하기 위함."""
+        try:
+            trades = self.exchange.fetch_my_trades(symbol, limit=5)
+            if trades:
+                return float(trades[-1]["price"])
+        except Exception as e:
+            logger.warning("fetch_my_trades 실패 %s: %s", symbol, e)
+        return None
+
     def fetch_open_symbols(self) -> set[str]:
         """거래소에서 현재 열려있는 포지션 심볼 집합 반환 (sync 용)."""
         try:
@@ -198,7 +238,10 @@ class LiveBroker:
             return set()
 
     def market_close(self, symbol: str, direction: str, qty: float) -> None:
-        """엔진 TP/SL 히트 시 호출. 열린 TP LIMIT 주문 취소 + 시장가 청산."""
+        """엔진 TP/SL 히트 시 호출. 열린 TP LIMIT 주문 취소 + 시장가 청산.
+
+        Raises: 청산 실패 시 Exception을 raise (고아 포지션 방지).
+        """
         if self.dry_run:
             logger.info("[DRY] market_close: %s %s qty=%s", symbol, direction, qty)
             return
@@ -207,15 +250,29 @@ class LiveBroker:
             self.exchange.cancel_all_orders(symbol)
         except Exception as e:
             logger.warning("주문 취소 실패 %s: %s", symbol, e)
-        # 2) 시장가 reduceOnly 청산
+        # 2) 거래소 실제 수량 조회 (더스트 방지)
         close_side = "sell" if direction == "long" else "buy"
+        actual_qty = qty
         try:
-            q = self.exchange.amount_to_precision(symbol, qty)
+            positions = self.exchange.fetch_positions([symbol])
+            for p in positions:
+                if float(p.get("contracts") or 0) != 0:
+                    actual_qty = abs(float(p["contracts"]))
+                    break
+        except Exception:
+            pass  # 조회 실패 시 전달받은 qty 사용
+        # 3) 시장가 reduceOnly 청산
+        try:
+            q = self.exchange.amount_to_precision(symbol, actual_qty)
+            if float(q) <= 0:
+                logger.error("market_close: qty가 0으로 반올림됨 (원래 %f) %s", actual_qty, symbol)
+                raise ValueError(f"qty=0 for {symbol}")
             self.exchange.create_order(symbol, "market", close_side, q, None,
-                                       {"reduceOnly": "true"})
+                                       {"reduceOnly": True})
             logger.info("market_close 완료: %s %s qty=%s", symbol, close_side, q)
         except Exception as e:
             logger.error("market_close 실패 %s: %s", symbol, e)
+            raise  # 호출자에게 전파 (고아 포지션 방지)
 
     def cancel_all_orders(self, symbol: str) -> None:
         """특정 심볼의 열린 주문 전체 취소 (긴급 청산 시 사용)."""

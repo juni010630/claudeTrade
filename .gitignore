@@ -2,9 +2,11 @@
 __pycache__/
 *.pyc
 data/cache/
-*.json
-!config/
-.DS_Store
-111%/
-live_trade.log*
+data/state.json
 *.log
+live_trade.log*
+trades.csv
+.DS_Store
+.pytest_cache/
+.claude/
+.vscode/

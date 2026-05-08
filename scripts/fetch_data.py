@@ -22,7 +22,7 @@ from data.fetcher import FundingRateFetcher, OHLCVFetcher
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Binance 선물 데이터 다운로드")
-    parser.add_argument("--params", default="config/params.yaml", help="파라미터 파일 경로")
+    parser.add_argument("--params", default="config/final_v13_eth.yaml", help="파라미터 파일 경로")
     parser.add_argument("--symbols", nargs="+", default=None)
     parser.add_argument("--timeframes", nargs="+", default=None)
     parser.add_argument("--start", default=None)

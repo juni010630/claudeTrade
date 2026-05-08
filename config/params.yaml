@@ -7,6 +7,9 @@ symbols:
 - ETHUSDT
 - SOLUSDT
 - BNBUSDT
+- XRPUSDT
+- AVAXUSDT
+- DOGEUSDT
 timeframes:
 - 1h
 - 4h
@@ -18,7 +21,7 @@ data:
   lookback_bars: 300
 strategies:
   momentum_breakout:
-    enabled: true
+    enabled: false
     bb_period: 20
     bb_std: 1.8
     volume_multiplier: 1.8
@@ -41,7 +44,7 @@ strategies:
     signal_tf: 1h
     filter_tf: 1d
   mean_reversion:
-    enabled: true
+    enabled: false
     bb_period: 20
     bb_std: 1.8
     rsi_period: 14
@@ -54,6 +57,10 @@ strategies:
     atr_tp_mult: 2.0
     atr_sl_mult: 0.7
     timeframe: 1h
+  supertrend:
+    enabled: false
+  multi_tf_breakout:
+    enabled: true
 regime:
   adx_period: 14
   adx_trending_threshold: 30.0
@@ -70,9 +77,11 @@ scorer:
   funding_long_max: 0.0003
   funding_short_min: -0.0003
   daily_ema_period: 200
-  tier_s_min_score: 6
-  tier_a_min_score: 3
-  tier_b_min_score: 2
+  tier_ss_min_score: 7
+  tier_s_min_score: 5
+  tier_a_min_score: 99
+  tier_b_min_score: 99
+  tier_c_min_score: 99
 risk:
   max_positions: 3
   max_same_direction: 3
@@ -84,6 +93,14 @@ risk:
   correlation_block_threshold: 0.9
   correlation_lookback: 100
   risk_per_trade: 0.01
+  max_notional_usd: 500000   # 심볼당 명목가 상한 (호가창 현실 반영)
+strategy_min_score:
+  ema_cross: 6
+strategy_block_hours:
+  ema_cross: [0, 1, 2, 3, 16, 17, 18, 19]
+  multi_tf_breakout: [4, 5, 6, 7]
+strategy_block_symbols:
+  ema_cross: [SOLUSDT, ETHUSDT]
 leverage_tiers:
   S:
     leverage: 10
@@ -98,7 +115,7 @@ execution:
   commission_maker: 0.0002
   commission_taker: 0.0005
   funding_interval_hours: 8
-  default_slippage_bps: 5.0
+  default_slippage_bps: 10.0   # 결정-체결 갭 + 호가창 깊이 완화 (실라이브 보수 근사)
 walk_forward:
   in_sample_months: 6
   out_sample_months: 2

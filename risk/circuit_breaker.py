@@ -22,7 +22,7 @@ class CircuitBreaker:
     _strategy_losses: dict[str, int] = field(default_factory=dict)
     _strategy_paused_until: dict[str, pd.Timestamp] = field(default_factory=dict)
     _global_losses: int = 0
-    _global_stopped: bool = False
+    _global_stopped_until: pd.Timestamp | None = None
 
     def record_result(self, strategy: str, is_win: bool) -> None:
         if is_win:
@@ -33,10 +33,18 @@ class CircuitBreaker:
             self._global_losses += 1
 
     def get_status(self, strategy: str, now: pd.Timestamp) -> BreakerStatus:
-        if self._global_stopped:
-            return BreakerStatus.STOPPED
+        # 전체 중단: 자동 해제 (pause_duration_hours 경과 시)
+        if self._global_stopped_until is not None:
+            if now < self._global_stopped_until:
+                return BreakerStatus.STOPPED
+            # 해제 후 카운터 전부 리셋 (전략별 포함)
+            self._global_stopped_until = None
+            self._global_losses = 0
+            self._strategy_losses.clear()
+            self._strategy_paused_until.clear()
+
         if self._global_losses >= self.global_stop_losses:
-            self._global_stopped = True
+            self._global_stopped_until = now + pd.Timedelta(hours=self.pause_duration_hours)
             return BreakerStatus.STOPPED
 
         paused_until = self._strategy_paused_until.get(strategy)
@@ -54,5 +62,5 @@ class CircuitBreaker:
 
     def reset_global(self) -> None:
         """수동 리셋 (검토 후)."""
-        self._global_stopped = False
+        self._global_stopped_until = None
         self._global_losses = 0

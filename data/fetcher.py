@@ -55,6 +55,11 @@ class OHLCVFetcher:
         df = pd.DataFrame(all_rows, columns=self.COLUMNS)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         df = df[df["timestamp"] < pd.Timestamp(until_ms, unit="ms", tz="UTC")]
+        # 마지막 봉이 미완성일 수 있으므로 제거 (현재 시각 기준)
+        now = pd.Timestamp.now(tz="UTC")
+        tf_mins = {"1m":1,"5m":5,"15m":15,"1h":60,"4h":240,"1d":1440}.get(timeframe, 60)
+        current_open = now.floor(f"{tf_mins}min")
+        df = df[df["timestamp"] < current_open]
         df = df.drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
         return df
 

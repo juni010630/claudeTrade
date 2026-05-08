@@ -41,6 +41,12 @@ class MetricsReport:
     # 전략별 분석
     strategy_breakdown: pd.DataFrame = field(default_factory=pd.DataFrame)
 
+    # 파산 플래그: cross margin 청산으로 equity ≤ 0 도달 시 True
+    bankrupt: bool = False
+
+    # 조기 중단 플래그: abort_mdd_threshold 초과로 백테가 도중 종료됨
+    aborted: bool = False
+
     @classmethod
     def from_run(cls, equity_curve: EquityCurve, ledger: Ledger) -> "MetricsReport":
         eq = equity_curve.to_series()
