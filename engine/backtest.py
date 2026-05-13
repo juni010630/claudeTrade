@@ -20,10 +20,24 @@ from risk.correlation import CorrelationFilter
 from risk.guards import DrawdownAction, RiskGuards
 from risk.margin_tiers import MarginTierTable
 from risk.position_sizer import PositionSizer
-from signals.models import LeverageTier
+from signals.models import LeverageTier, Signal, SignalScore
 from signals.scorer import ConfluenceScorer
 from signals.validators import validate
 from strategies.base import BaseStrategy
+
+
+def _cand_proxy(cand: dict) -> Signal:
+    """후보 dict → Signal 객체 (risk guards / corr filter용 최소 프록시)."""
+    return Signal(
+        symbol=cand["symbol"],
+        strategy=cand["strategy"],
+        direction=cand["direction"],
+        entry_price=cand["entry_price"],
+        tp_price=cand["tp_price"],
+        sl_price=cand["sl_price"],
+        timestamp=cand["timestamp"] if isinstance(cand["timestamp"], pd.Timestamp)
+                  else pd.Timestamp(cand["timestamp"]),
+    )
 
 
 class BacktestEngine:
@@ -50,6 +64,7 @@ class BacktestEngine:
         strategy_min_score: dict[str, int] | None = None,  # 전략별 최소 score 게이트 (scorer 위 덮어씀)
         strategy_block_hours: dict[str, list[int]] | None = None,  # 전략별 차단 UTC 시간대
         strategy_block_symbols: dict[str, list[str]] | None = None,  # 전략별 차단 심볼
+        tier_block_symbols: dict[str, list[str]] | None = None,  # 티어별 차단 심볼 (e.g. {"S": ["ADAUSDT"]})
         abort_mdd_threshold: float | None = None,  # e.g. -0.35 → MDD 35% 초과 시 조기 중단 (None=끝까지)
         subbar_tpsl: bool = False,  # True → trailing 없어도 sub-bar(5m)로 TP/SL 체크
         isolated_margin: bool = False,  # True → 포지션별 isolated margin 청산 (cross 대신)
@@ -86,6 +101,9 @@ class BacktestEngine:
         self._strategy_block_symbols = {
             k: set(v) for k, v in (strategy_block_symbols or {}).items()
         }
+        self._tier_block_symbols = {
+            k: set(v) for k, v in (tier_block_symbols or {}).items()
+        }
         self._block_directions: set[str] = set()  # {"short"} → 숏 차단, {"long"} → 롱 차단
         self._bankrupt = False
 
@@ -96,6 +114,11 @@ class BacktestEngine:
         self._sl_reversal = sl_reversal
         self._sl_reversal_leverage = sl_reversal_leverage
         self._equity_history: list[float] = []
+
+        # 시그널 덤프/리플레이 모드
+        self._dump_mode = False
+        self._signal_log: list[dict] = []
+        self._replay_index: dict[int, list[dict]] | None = None
 
         # Early-stop (옵셔널): running peak 대비 equity가 threshold 초과 하락 시 중단.
         # wf_score의 MDD 필터와 등가 (중간 위반 시 최종 MDD도 위반 확정).
@@ -138,6 +161,49 @@ class BacktestEngine:
         """MTM/일반 가격 참조용 close 추출."""
         return {sym: float(bar["close"]) for sym, bar in self._get_bars(snapshot).items()}
 
+    # ── 시그널 덤프/리플레이 ─────────────────────────────────────
+    def _generate_all_candidates(
+        self, snapshot: MarketSnapshot, regime, prices: dict[str, float],
+    ) -> list[dict]:
+        """전략별 시그널 생성 + 스코링 + 정적 필터 → 후보 시그널 목록.
+
+        CB 체크는 여기서 하지 않는다 (동적 상태 의존 → 실행 루프에서 처리).
+        """
+        candidates: list[dict] = []
+        for strategy in self.strategies:
+            if not is_strategy_eligible(regime.regime, strategy.name):
+                continue
+            signals = strategy.generate_signals(snapshot, regime)
+            for signal in signals:
+                if not validate(signal):
+                    continue
+                if signal.direction in self._block_directions:
+                    continue
+                scored = self.scorer.score(signal, snapshot, regime)
+                if scored.tier == LeverageTier.NO_TRADE:
+                    continue
+                min_req = self._strategy_min_score.get(strategy.name)
+                if min_req is not None and scored.total < min_req:
+                    continue
+                blocked = self._strategy_block_hours.get(strategy.name)
+                if blocked and signal.timestamp.hour in blocked:
+                    continue
+                blocked_syms = self._strategy_block_symbols.get(strategy.name)
+                if blocked_syms and signal.symbol in blocked_syms:
+                    continue
+                candidates.append({
+                    "timestamp": signal.timestamp,
+                    "symbol": signal.symbol,
+                    "strategy": strategy.name,
+                    "direction": signal.direction,
+                    "entry_price": signal.entry_price,
+                    "tp_price": signal.tp_price,
+                    "sl_price": signal.sl_price,
+                    "score": scored.total,
+                    "tier": scored.tier.value,
+                })
+        return candidates
+
     def run(self, snapshots: Iterator[MarketSnapshot]) -> MetricsReport:
         for snapshot in snapshots:
             self._process_bar(snapshot)
@@ -147,6 +213,31 @@ class BacktestEngine:
         report = MetricsReport.from_run(self.equity_curve, self.ledger)
         report.bankrupt = self._bankrupt
         report.aborted = self._aborted
+        return report
+
+    def run_dump(
+        self, snapshots: Iterator[MarketSnapshot],
+    ) -> tuple[MetricsReport, pd.DataFrame]:
+        """풀 백테스트 실행 + 후보 시그널 수집 → (report, signals_df)."""
+        self._dump_mode = True
+        self._signal_log = []
+        report = self.run(snapshots)
+        self._dump_mode = False
+        df = pd.DataFrame(self._signal_log) if self._signal_log else pd.DataFrame()
+        return report, df
+
+    def run_replay(
+        self, signals_df: pd.DataFrame, snapshots: Iterator[MarketSnapshot],
+    ) -> MetricsReport:
+        """리플레이 모드: 사전 수집된 시그널로 사이징/리스크만 재계산."""
+        self._replay_index = {}
+        for _, row in signals_df.iterrows():
+            ts_key = pd.Timestamp(row["timestamp"]).value
+            if ts_key not in self._replay_index:
+                self._replay_index[ts_key] = []
+            self._replay_index[ts_key].append(row.to_dict())
+        report = self.run(snapshots)
+        self._replay_index = None
         return report
 
     def _process_bar(self, snapshot: MarketSnapshot) -> None:
@@ -259,93 +350,88 @@ class BacktestEngine:
         # 4. 시장 국면 분류
         regime = self.regime_detector.classify(snapshot)
 
-        # 5. 전략별 신호 생성
-        for strategy in self.strategies:
-            cb_status = self.circuit_breaker.get_status(strategy.name, now)
+        # 5. 후보 시그널 수집 (전략 생성 or 리플레이 캐시)
+        if self._replay_index is not None:
+            candidates = self._replay_index.get(now.value, [])
+        else:
+            candidates = self._generate_all_candidates(snapshot, regime, prices)
+            if self._dump_mode:
+                self._signal_log.extend(candidates)
+
+        # 6. 동적 필터 + 체결
+        for cand in candidates:
+            # 티어별 심볼 차단
+            tier_blocked = self._tier_block_symbols.get(cand["tier"])
+            if tier_blocked and cand["symbol"] in tier_blocked:
+                continue
+
+            cb_status = self.circuit_breaker.get_status(cand["strategy"], now)
             if cb_status != BreakerStatus.ACTIVE:
                 continue
 
-            if not is_strategy_eligible(regime.regime, strategy.name):
+            if not self.guards.is_entry_allowed(state, _cand_proxy(cand)):
                 continue
 
-            signals = strategy.generate_signals(snapshot, regime)
+            if self.corr_filter.is_blocked(_cand_proxy(cand), state):
+                continue
 
-            for signal in signals:
-                if not validate(signal):
-                    continue
+            tier = LeverageTier(cand["tier"])
+            size_usd, leverage = self.sizer.calculate(
+                tier, state.equity, cand["entry_price"], cand["sl_price"]
+            )
+            if size_usd <= 0:
+                continue
 
-                # 방향 차단 (long_only / short_only 지원)
-                if signal.direction in self._block_directions:
-                    continue
+            # Equity Curve Trading: equity < SMA(N) → 사이즈 50% 축소
+            if self._equity_curve_trading > 0 and len(self._equity_history) >= self._equity_curve_trading:
+                sma = sum(self._equity_history[-self._equity_curve_trading:]) / self._equity_curve_trading
+                if state.equity < sma:
+                    size_usd *= 0.5
 
-                scored = self.scorer.score(signal, snapshot, regime)
-                if scored.tier == LeverageTier.NO_TRADE:
-                    continue
-                min_req = self._strategy_min_score.get(strategy.name)
-                if min_req is not None and scored.total < min_req:
-                    continue
-                blocked = self._strategy_block_hours.get(strategy.name)
-                if blocked and signal.timestamp.hour in blocked:
-                    continue
-                blocked_syms = self._strategy_block_symbols.get(strategy.name)
-                if blocked_syms and signal.symbol in blocked_syms:
-                    continue
+            # ADX Scaling: 레짐 애매 구간 (ADX 20-25) → 사이즈 60%
+            if self._adx_scaling and hasattr(regime, 'adx'):
+                if 20 < regime.adx < 25:
+                    size_usd *= 0.6
 
-                if not self.guards.is_entry_allowed(state, signal):
-                    continue
+            side = OrderSide.BUY if cand["direction"] == "long" else OrderSide.SELL
+            mkt_price = prices.get(cand["symbol"], cand["entry_price"])
+            shift = mkt_price - cand["entry_price"]
 
-                if self.corr_filter.is_blocked(signal, state):
-                    continue
+            scored_proxy = SignalScore(
+                total=cand["score"],
+                tier=tier,
+                signal=_cand_proxy(cand),
+            )
 
-                size_usd, leverage = self.sizer.calculate(
-                    scored.tier, state.equity, signal.entry_price, signal.sl_price
-                )
-                if size_usd <= 0:
-                    continue
-
-                # Equity Curve Trading: equity < SMA(N) → 사이즈 50% 축소
-                if self._equity_curve_trading > 0 and len(self._equity_history) >= self._equity_curve_trading:
-                    sma = sum(self._equity_history[-self._equity_curve_trading:]) / self._equity_curve_trading
-                    if state.equity < sma:
-                        size_usd *= 0.5
-
-                # ADX Scaling: 레짐 애매 구간 (ADX 20-25) → 사이즈 60%
-                if self._adx_scaling and hasattr(regime, 'adx'):
-                    if 20 < regime.adx < 25:
-                        size_usd *= 0.6
-
-                side = OrderSide.BUY if signal.direction == "long" else OrderSide.SELL
-                mkt_price = prices.get(signal.symbol, signal.entry_price)
-                shift = mkt_price - signal.entry_price
-
-                order = Order(
-                    symbol=signal.symbol,
-                    side=side,
-                    size_usd=size_usd,
-                    price=mkt_price,
-                    order_type=OrderType.MARKET,
-                    leverage=leverage,
-                    strategy=strategy.name,
-                    signal_score=scored,
-                    timestamp=now,
-                    direction=signal.direction,
-                    tp_price=signal.tp_price + shift,
-                    sl_price=signal.sl_price + shift,
-                )
-                current_bar = (
-                    snapshot.bars[signal.symbol]["1h"].iloc[-1]
-                    if "1h" in snapshot.bars.get(signal.symbol, {})
-                    else None
-                )
-                try:
-                    fill = self.broker.submit(order, current_bar)
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).error(
-                        "주문 실패 %s %s: %s — 건너뜀", signal.symbol, signal.direction, e)
-                    continue
-                self.tracker.apply_fill(fill)
-                state = self.tracker.snapshot()
+            order = Order(
+                symbol=cand["symbol"],
+                side=side,
+                size_usd=size_usd,
+                price=mkt_price,
+                order_type=OrderType.MARKET,
+                leverage=leverage,
+                strategy=cand["strategy"],
+                signal_score=scored_proxy,
+                timestamp=now,
+                direction=cand["direction"],
+                tp_price=cand["tp_price"] + shift,
+                sl_price=cand["sl_price"] + shift,
+            )
+            _1h_df = snapshot.bars.get(cand["symbol"], {}).get("1h")
+            current_bar = (
+                _1h_df.iloc[-1]
+                if _1h_df is not None and len(_1h_df) > 0
+                else None
+            )
+            try:
+                fill = self.broker.submit(order, current_bar)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    "주문 실패 %s %s: %s — 건너뜀", cand["symbol"], cand["direction"], e)
+                continue
+            self.tracker.apply_fill(fill)
+            state = self.tracker.snapshot()
 
         # 6. 최종 MTM 재계산 후 자산곡선 기록 + early-stop 체크
         self._record_equity(now, prices)

@@ -163,6 +163,7 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         strategy_min_score=p.get("strategy_min_score"),
         strategy_block_hours=p.get("strategy_block_hours"),
         strategy_block_symbols=p.get("strategy_block_symbols"),
+        tier_block_symbols=p.get("tier_block_symbols"),
         notifier=notifier,
         trade_log_path="trades.csv",
     )

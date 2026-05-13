@@ -114,6 +114,9 @@ strategy_block_hours:
   - 19
   - 21
   - 23
+tier_block_symbols:
+  S:
+  - ADAUSDT
 symbols:
 - ETHUSDT
 - BTCUSDT

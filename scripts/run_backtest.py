@@ -159,6 +159,7 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         strategy_min_score=p.get("strategy_min_score"),
         strategy_block_hours=p.get("strategy_block_hours"),
         strategy_block_symbols=p.get("strategy_block_symbols"),
+        tier_block_symbols=p.get("tier_block_symbols"),
         abort_mdd_threshold=abort_mdd,
         isolated_margin=isolated_margin,
         **engine_kwargs,
