@@ -8,9 +8,10 @@ import pandas as pd
 
 
 class LeverageTier(Enum):
-    SS = "SS"       # 완벽 신호 (7점): 최고 레버리지
-    S  = "S"        # 강한 신호 (5-6점)
-    A  = "A"        # 중간 신호 (3-4점)
+    SSS = "SSS"     # 최고 신호 (6점+): 최대 레버리지
+    SS = "SS"       # 강한 신호 (5점)
+    S  = "S"        # 중상 신호 (4점)
+    A  = "A"        # 중간 신호 (3점)
     B  = "B"        # 약한 신호 (2점)
     C  = "C"        # 최소 신호 (1점): 소규모 탐색
     NO_TRADE = "NO_TRADE"

@@ -70,11 +70,14 @@ def build_exchange(demo: bool) -> ccxt.Exchange:
             ".env 파일을 확인하세요."
         )
 
-    exchange = ccxt.binanceusdm({
+    exchange = ccxt.binance({
         "apiKey": api_key,
         "secret": secret,
         "enableRateLimit": True,
-        "options": {"defaultType": "future"},
+        "options": {
+            "defaultType": "future",
+            "disableFuturesSandboxWarning": True,
+        },
     })
 
     if demo:
@@ -127,6 +130,7 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
             funding_long_max=sc.get("funding_long_max", 0.0003),
             funding_short_min=sc.get("funding_short_min", -0.0003),
             daily_ema_period=sc.get("daily_ema_period", 200),
+            tier_sss_min_score=sc.get("tier_sss_min_score", 99),
             tier_ss_min_score=sc.get("tier_ss_min_score", 7),
             tier_s_min_score=sc.get("tier_s_min_score", 5),
             tier_a_min_score=sc.get("tier_a_min_score", 4),
@@ -138,6 +142,7 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
             max_same_direction=r.get("max_same_direction", 4),
             daily_pause_threshold=r.get("daily_drawdown_pause", -0.04),
             daily_stop_threshold=r.get("daily_drawdown_stop", -0.12),
+            tp_cooldown_hours=r.get("tp_cooldown_hours", 0.0),
         ),
         circuit_breaker=CircuitBreaker(
             strategy_pause_losses=r.get("circuit_breaker_pause_losses", 5),
@@ -300,12 +305,13 @@ def main() -> None:
         if dry_run:
             mode += " | DRY-RUN"
         strats = [s.name for s in engine.strategies]
+        balance_str = f"${usdt:,.2f}" if usdt is not None else "N/A"
         notifier.notify_info(
             f"🚀 <b>봇 시작</b>\n"
             f"모드: {mode}\n"
             f"심볼: {', '.join(symbols)}\n"
             f"전략: {', '.join(strats)}\n"
-            f"잔고: ${usdt:,.2f}"
+            f"잔고: {balance_str}"
         )
 
     # ── SL 폴러 (testnet 전용, 5분 간격) + engine 접근 직렬화용 lock ──
@@ -367,16 +373,18 @@ def main() -> None:
                 # state 디스크 저장 (매 봉 — 크래시 복구용)
                 state_store.save(state)
 
-                # 매 봉 텔레그램 알림
-                if notifier and notifier.enabled:
-                    pos_info = ""
+                # 매 봉 텔레그램 알림 (포지션 있을 때만)
+                if notifier and notifier.enabled and state.open_position_count > 0:
+                    pos_lines = []
                     for sym, pos in state.positions.items():
-                        pnl_pct = pos.unrealized_pnl / state.equity * 100 if state.equity > 0 else 0
-                        pos_info += f"\n  {sym} {pos.direction} {pnl_pct:+.1f}%"
+                        pos_lines.append(
+                            f"  {sym} {pos.direction}  진입 {pos.entry_price:,.4f} | "
+                            f"PnL ${pos.unrealized_pnl:+,.2f} x{pos.leverage}"
+                        )
                     notifier.notify_info(
                         f"#{bar_count} | {snapshot.timestamp.strftime('%m-%d %H:%M')} UTC\n"
                         f"잔고: ${state.equity:,.2f} | DD: {state.daily_pnl_pct*100:+.1f}%\n"
-                        f"포지션: {state.open_position_count}개{pos_info}"
+                        f"포지션: {state.open_position_count}개\n" + "\n".join(pos_lines)
                     )
 
                 # 잔고 대조 (10봉마다)
@@ -404,15 +412,31 @@ def main() -> None:
                             closed, 100 * wins / closed, total_pnl,
                         )
 
-                # heartbeat (24봉 = 24시간마다 텔레그램 알림)
-                if bar_count % 24 == 0 and notifier and notifier.enabled:
+                # heartbeat (12봉 = 12시간마다)
+                if bar_count % 12 == 0 and notifier and notifier.enabled:
                     trades = engine.ledger.records
-                    hb = (f"💓 Heartbeat #{bar_count // 24}d\n"
-                          f"자산: {state.equity:.2f} USDT\n"
-                          f"포지션: {state.open_position_count}개\n"
-                          f"누적 거래: {len(trades)}건")
+                    n = len(trades)
+                    if n > 0:
+                        wins = sum(1 for t in trades if t.pnl > 0)
+                        wr_pct = wins / n * 100
+                        gross_win  = sum(t.pnl for t in trades if t.pnl > 0)
+                        gross_loss = abs(sum(t.pnl for t in trades if t.pnl <= 0))
+                        pf = gross_win / gross_loss if gross_loss else float("inf")
+                        cum_pnl = sum(t.pnl for t in trades)
+                    else:
+                        wr_pct, pf, cum_pnl = 0.0, 0.0, 0.0
                     try:
-                        notifier.notify_info(hb)
+                        notifier.notify_heartbeat(
+                            interval_h=12,
+                            bar_count=bar_count,
+                            equity=state.equity,
+                            initial_capital=usdt or state.equity,
+                            positions=state.open_position_count,
+                            trades=n,
+                            wr_pct=wr_pct,
+                            pf=pf,
+                            cum_pnl=cum_pnl,
+                        )
                     except Exception:
                         pass
 

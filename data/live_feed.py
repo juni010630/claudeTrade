@@ -165,7 +165,8 @@ class LiveFeed:
     def wait_and_snap(self) -> MarketSnapshot:
         """다음 1h 봉 마감을 기다렸다가 스냅샷 반환."""
         wait = self._seconds_to_next_close(
-            self.TF_MINS.get(self.primary_tf, 60)
+            self.TF_MINS.get(self.primary_tf, 60),
+            margin_sec=1
         )
         logger.info("다음 봉 마감까지 %.0f초 대기...", wait)
         time.sleep(wait)

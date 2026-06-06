@@ -114,3 +114,30 @@ class EMACrossStrategy(BaseStrategy):
                 )
 
         return signals
+
+    def check_early_exit(self, position, snapshot: MarketSnapshot) -> bool:
+        if not self.config.get("early_exit_on_opp", False):
+            return False
+            
+        sym = position.symbol
+        df_signal = snapshot.bars.get(sym, {}).get(self.signal_tf)
+        if df_signal is None or len(df_signal) < self.macd_slow + self.macd_signal + 5:
+            return False
+
+        fast = calc_ema(df_signal, self.fast_period)
+        slow = calc_ema(df_signal, self.slow_period)
+        prev_fast, curr_fast = float(fast.iloc[-2]), float(fast.iloc[-1])
+        prev_slow, curr_slow = float(slow.iloc[-2]), float(slow.iloc[-1])
+
+        _, _, hist = calc_macd(df_signal, self.macd_fast, self.macd_slow, self.macd_signal)
+        prev_hist, curr_hist = float(hist.iloc[-2]), float(hist.iloc[-1])
+
+        # 모멘텀 기준만 체크 (1d EMA 필터 무시)
+        mom_long = (prev_fast <= prev_slow and curr_fast > curr_slow and prev_hist <= 0 < curr_hist)
+        mom_short = (prev_fast >= prev_slow and curr_fast < curr_slow and prev_hist >= 0 > curr_hist)
+
+        if position.direction == "long" and mom_short:
+            return True
+        if position.direction == "short" and mom_long:
+            return True
+        return False

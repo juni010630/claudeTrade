@@ -31,6 +31,10 @@ leverage_tiers:
   SS:
     leverage: 40
     size_fraction: 0.3
+  SSS:
+    leverage: 50
+    size_fraction: 0.3
+    risk_per_trade: 0.20
 primary_timeframe: 1h
 regime:
   adx_period: 14
@@ -52,6 +56,7 @@ risk:
   max_positions: 7
   max_same_direction: 5
   risk_per_trade: 0.099
+  tp_cooldown_hours: 6.0
 scorer:
   daily_ema_period: 200
   funding_long_max: 0.0003
@@ -62,6 +67,7 @@ scorer:
   tier_b_min_score: 99
   tier_c_min_score: 99
   tier_s_min_score: 4
+  tier_sss_min_score: 6
   tier_ss_min_score: 5
   volume_ratio_threshold: 1.8
 strategies:
@@ -101,19 +107,43 @@ strategy_block_hours:
   - 7
   - 8
   - 9
+  - 10
+  - 11
+  - 13
+  - 14
   - 16
+  - 18
   - 19
   - 21
   - 23
   multi_tf_breakout:
-  - 6
+  - 3
+  - 4
+  - 5
   - 7
   - 8
   - 9
+  - 10
+  - 13
   - 16
   - 19
+  - 20
   - 21
   - 23
+strategy_size_bonus:
+  ema_cross:
+  - 0
+  - 5
+  - 12
+  - 15
+  - 22
+  multi_tf_breakout:
+  - 0
+  - 1
+  - 12
+  - 14
+  - 22
+strategy_size_bonus_mult: 1.25
 tier_block_symbols:
   S:
   - ADAUSDT

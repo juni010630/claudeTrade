@@ -136,3 +136,41 @@ class MultiTFBreakoutStrategy(BaseStrategy):
                 continue
 
         return signals
+
+    def check_early_exit(self, position, snapshot: MarketSnapshot) -> bool:
+        if not self.config.get("early_exit_on_opp", False):
+            return False
+            
+        sym = position.symbol
+        df_1h = snapshot.bars.get(sym, {}).get(self.signal_tf)
+        df_4h = snapshot.bars.get(sym, {}).get(self.confirm_tf)
+        
+        if df_1h is None or len(df_1h) < self.bb_period + 5:
+            return False
+        if df_4h is None or len(df_4h) < self.bb_period + 5:
+            return False
+
+        try:
+            upper_4h, mid_4h, lower_4h = bollinger_bands(df_4h, self.bb_period, self.bb_std_4h)
+            rsi_4h = calc_rsi(df_4h, self.rsi_period)
+            close_4h = float(df_4h["close"].iloc[-1])
+            rsi_4h_val = float(rsi_4h.iloc[-1])
+            
+            bull_4h = close_4h > float(upper_4h.iloc[-1]) and rsi_4h_val >= self.rsi_long_min
+            bear_4h = close_4h < float(lower_4h.iloc[-1]) and rsi_4h_val <= self.rsi_short_max
+
+            upper_1h, _, lower_1h = bollinger_bands(df_1h, self.bb_period, self.bb_std_1h)
+            curr_close = float(df_1h["close"].iloc[-1])
+            prev_close = float(df_1h["close"].iloc[-2])
+            curr_upper = float(upper_1h.iloc[-1])
+            curr_lower = float(lower_1h.iloc[-1])
+            
+            # 조기 청산 시 거래량 필터 제외, 가격+모멘텀 반전만 확인
+            if position.direction == "long" and bear_4h and prev_close >= prev_lower and curr_close < curr_lower:
+                return True
+            if position.direction == "short" and bull_4h and prev_close <= prev_upper and curr_close > curr_upper:
+                return True
+        except Exception:
+            pass
+            
+        return False

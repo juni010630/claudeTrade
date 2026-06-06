@@ -32,6 +32,7 @@ class ConfluenceScorer:
         funding_long_max: float = 0.0003,
         funding_short_min: float = -0.0003,
         daily_ema_period: int = 200,
+        tier_sss_min_score: int = 99,  # 기본 비활성 — yaml에서 명시적으로 설정
         tier_ss_min_score: int = 7,   # 완벽한 신호 (최고점)
         tier_s_min_score: int = 5,
         tier_a_min_score: int = 3,
@@ -48,6 +49,7 @@ class ConfluenceScorer:
         self.funding_long_max = funding_long_max
         self.funding_short_min = funding_short_min
         self.daily_ema_period = daily_ema_period
+        self.tier_sss_min_score = tier_sss_min_score
         self.tier_ss_min_score = tier_ss_min_score
         self.tier_s_min_score  = tier_s_min_score
         self.tier_a_min_score  = tier_a_min_score
@@ -59,6 +61,8 @@ class ConfluenceScorer:
         self._rsi_neutral_penalty = rsi_neutral_penalty
 
     def _map_tier(self, total: int) -> LeverageTier:
+        if total >= self.tier_sss_min_score:
+            return LeverageTier.SSS
         if total >= self.tier_ss_min_score:
             return LeverageTier.SS
         if total >= self.tier_s_min_score:

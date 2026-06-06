@@ -21,3 +21,8 @@ class BaseStrategy(ABC):
         snapshot: MarketSnapshot,
         regime: RegimeState,
     ) -> list[Signal]: ...
+
+    def check_early_exit(self, position, snapshot: MarketSnapshot) -> bool:
+        """포지션 조기 청산 조건(반대 신호 등) 만족 시 True 반환."""
+        return False
+

@@ -20,11 +20,14 @@ class RiskGuards:
         max_same_direction: int = 3,
         daily_pause_threshold: float = -0.05,
         daily_stop_threshold: float = -0.08,
+        tp_cooldown_hours: float = 0.0,
     ) -> None:
         self.max_positions = max_positions
         self.max_same_direction = max_same_direction
         self.daily_pause = daily_pause_threshold
         self.daily_stop = daily_stop_threshold
+        self.tp_cooldown_hours = tp_cooldown_hours
+        self._last_tp_times: dict[tuple[str, str], pd.Timestamp] = {}  # (symbol, strategy) -> timestamp
 
     def check_daily_drawdown(self, state: PortfolioState) -> DrawdownAction:
         pnl = state.daily_pnl_pct
@@ -47,6 +50,20 @@ class RiskGuards:
         """이미 해당 심볼 포지션이 없어야 진입 가능."""
         return symbol not in state.positions
 
+    def record_tp(self, symbol: str, strategy: str, timestamp: pd.Timestamp) -> None:
+        """TP 히트 시점을 기록."""
+        self._last_tp_times[(symbol, strategy)] = timestamp
+
+    def is_cooldown_active(self, symbol: str, strategy: str, now: pd.Timestamp) -> bool:
+        """TP 쿨다운 중이면 True."""
+        if self.tp_cooldown_hours <= 0:
+            return False
+        last_tp = self._last_tp_times.get((symbol, strategy))
+        if last_tp is None:
+            return False
+        elapsed = (now - last_tp).total_seconds() / 3600
+        return elapsed < self.tp_cooldown_hours
+
     def is_entry_allowed(self, state: PortfolioState, signal: Signal) -> bool:
         dd = self.check_daily_drawdown(state)
         if dd != DrawdownAction.OK:
@@ -56,5 +73,7 @@ class RiskGuards:
         if not self.check_direction_limit(state, signal.direction):
             return False
         if not self.check_symbol_free(state, signal.symbol):
+            return False
+        if self.is_cooldown_active(signal.symbol, signal.strategy, signal.timestamp):
             return False
         return True

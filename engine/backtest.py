@@ -65,6 +65,11 @@ class BacktestEngine:
         strategy_block_hours: dict[str, list[int]] | None = None,  # 전략별 차단 UTC 시간대
         strategy_block_symbols: dict[str, list[str]] | None = None,  # 전략별 차단 심볼
         tier_block_symbols: dict[str, list[str]] | None = None,  # 티어별 차단 심볼 (e.g. {"S": ["ADAUSDT"]})
+        symbol_block_directions: dict[str, list[str]] | None = None,  # 심볼별 차단 방향 (e.g. {"ETHUSDT": ["long"]})
+        direction_size_mult: dict[str, float] | None = None,          # 방향별 사이즈 배율 (e.g. {"long": 0.5, "short": 1.25})
+        strategy_size_penalty: dict[str, list[int]] | None = None,  # 전략별 불리 시간대 → 사이즈 50% 축소
+        strategy_size_bonus: dict[str, list[int]] | None = None,   # 전략별 유리 시간대 → 사이즈 N배 확대
+        strategy_size_bonus_mult: float = 1.5,                      # bonus 배율 (기본 1.5x)
         abort_mdd_threshold: float | None = None,  # e.g. -0.35 → MDD 35% 초과 시 조기 중단 (None=끝까지)
         subbar_tpsl: bool = False,  # True → trailing 없어도 sub-bar(5m)로 TP/SL 체크
         isolated_margin: bool = False,  # True → 포지션별 isolated margin 청산 (cross 대신)
@@ -72,6 +77,8 @@ class BacktestEngine:
         adx_scaling: bool = False,       # True → ADX 20-25 구간에서 사이징 60% 축소
         sl_reversal: bool = False,       # True → SL 히트 시 반대 방향 절반 사이즈 진입
         sl_reversal_leverage: int = 10,  # reversal 포지션 레버리지 (기본 10x)
+        tp_reversal: bool = False,       # True → TP 히트 시 반대 방향 동일 사이즈 진입
+        tp_extend_on_signal: bool = False,  # True → 동일 방향 재시그널 시 TP 연장 (신규 진입 없음)
         notifier=None,
         trade_log_path: str | None = None,  # CSV 거래 로그 경로 (라이브용)
     ) -> None:
@@ -104,6 +111,17 @@ class BacktestEngine:
         self._tier_block_symbols = {
             k: set(v) for k, v in (tier_block_symbols or {}).items()
         }
+        self._symbol_block_directions: dict[str, set[str]] = {
+            k: set(v) for k, v in (symbol_block_directions or {}).items()
+        }
+        self._direction_size_mult: dict[str, float] = direction_size_mult or {}
+        self._strategy_size_penalty: dict[str, set[int]] = {
+            k: set(v) for k, v in (strategy_size_penalty or {}).items()
+        }
+        self._strategy_size_bonus: dict[str, set[int]] = {
+            k: set(v) for k, v in (strategy_size_bonus or {}).items()
+        }
+        self._strategy_size_bonus_mult = strategy_size_bonus_mult
         self._block_directions: set[str] = set()  # {"short"} → 숏 차단, {"long"} → 롱 차단
         self._bankrupt = False
 
@@ -113,12 +131,17 @@ class BacktestEngine:
         self._adx_scaling = adx_scaling
         self._sl_reversal = sl_reversal
         self._sl_reversal_leverage = sl_reversal_leverage
+        self._tp_reversal = tp_reversal
+        self._tp_extend_on_signal = tp_extend_on_signal
         self._equity_history: list[float] = []
 
         # 시그널 덤프/리플레이 모드
         self._dump_mode = False
         self._signal_log: list[dict] = []
         self._replay_index: dict[int, list[dict]] | None = None
+
+        # 실제 체결 기록 모드 (fast_sweep용)
+        self._fill_log: list[dict] | None = None
 
         # Early-stop (옵셔널): running peak 대비 equity가 threshold 초과 하락 시 중단.
         # wf_score의 MDD 필터와 등가 (중간 위반 시 최종 MDD도 위반 확정).
@@ -128,9 +151,12 @@ class BacktestEngine:
 
         self.ledger = Ledger(csv_path=trade_log_path)
         self.equity_curve = EquityCurve()
+        self.notifier = notifier
         self.tracker = PortfolioTracker(initial_capital, self.ledger, notifier=notifier)
 
         self._last_day: pd.Timestamp | None = None
+        self._last_dd_alert: DrawdownAction | None = None
+        self._last_block_hour_alerts: set[tuple[str, pd.Timestamp]] = set()
 
     def _localize(self, ts: pd.Timestamp) -> pd.Timestamp:
         """daily_reset_tz 기준 로컬 시간으로 변환."""
@@ -161,6 +187,68 @@ class BacktestEngine:
         """MTM/일반 가격 참조용 close 추출."""
         return {sym: float(bar["close"]) for sym, bar in self._get_bars(snapshot).items()}
 
+    def _notify_info(self, text: str) -> None:
+        if self.notifier is None or not getattr(self.notifier, "enabled", False):
+            return
+        try:
+            self.notifier.notify_info(text)
+        except Exception:
+            pass
+
+    def _notify_drawdown_action(
+        self,
+        action: DrawdownAction,
+        state,
+        now: pd.Timestamp,
+    ) -> None:
+        if action == DrawdownAction.OK:
+            if self._last_dd_alert is not None:
+                self._last_dd_alert = None
+            return
+        if self._last_dd_alert == action:
+            return
+
+        self._last_dd_alert = action
+        label = "신규 진입 중단" if action == DrawdownAction.PAUSE else "전 포지션 강제 청산"
+        threshold = self.guards.daily_pause if action == DrawdownAction.PAUSE else self.guards.daily_stop
+        self._notify_info(
+            f"⚠️ <b>DrawDown {action.value.upper()}</b>\n"
+            f"시간: {now.strftime('%Y-%m-%d %H:%M')} UTC\n"
+            f"조치: {label}\n"
+            f"일일DD: {state.daily_pnl_pct * 100:+.2f}% "
+            f"(기준 {threshold * 100:+.2f}%)\n"
+            f"잔고: ${state.equity:,.2f}\n"
+            f"포지션: {state.open_position_count}개"
+        )
+
+    def _notify_blocked_trading_hours(self, now: pd.Timestamp) -> None:
+        if self.notifier is None or not getattr(self.notifier, "enabled", False):
+            return
+        if not self._strategy_block_hours:
+            return
+
+        blocked = [
+            strategy
+            for strategy, hours in self._strategy_block_hours.items()
+            if now.hour in hours
+        ]
+        if not blocked:
+            return
+
+        hour_key = now.floor("h")
+        for strategy in blocked:
+            key = (strategy, hour_key)
+            if key in self._last_block_hour_alerts:
+                continue
+            self._last_block_hour_alerts.add(key)
+            hours = sorted(self._strategy_block_hours.get(strategy, set()))
+            self._notify_info(
+                f"⏸ <b>매매 차단 시간대</b>\n"
+                f"시간: {now.strftime('%Y-%m-%d %H:%M')} UTC\n"
+                f"전략: {strategy}\n"
+                f"차단 시간: {', '.join(f'{h:02d}:00' for h in hours)} UTC"
+            )
+
     # ── 시그널 덤프/리플레이 ─────────────────────────────────────
     def _generate_all_candidates(
         self, snapshot: MarketSnapshot, regime, prices: dict[str, float],
@@ -190,6 +278,9 @@ class BacktestEngine:
                     continue
                 blocked_syms = self._strategy_block_symbols.get(strategy.name)
                 if blocked_syms and signal.symbol in blocked_syms:
+                    continue
+                blocked_dirs = self._symbol_block_directions.get(signal.symbol)
+                if blocked_dirs and signal.direction in blocked_dirs:
                     continue
                 candidates.append({
                     "timestamp": signal.timestamp,
@@ -224,6 +315,24 @@ class BacktestEngine:
         report = self.run(snapshots)
         self._dump_mode = False
         df = pd.DataFrame(self._signal_log) if self._signal_log else pd.DataFrame()
+        return report, df
+
+    def run_fill_dump(
+        self, snapshots: Iterator[MarketSnapshot],
+    ) -> tuple[MetricsReport, pd.DataFrame]:
+        """풀 백테스트 + 실제 체결된 진입만 기록 → (report, entries_df).
+
+        entries_df 컬럼:
+          timestamp, symbol, strategy, direction,
+          entry_price, tp_price, sl_price, sl_dist (= ATR * sl_mult),
+          score, tier
+
+        sl_dist / orig_sl_mult = ATR → TP/SL 배수 스윕 시 ATR 역산 가능.
+        """
+        self._fill_log = []
+        report = self.run(snapshots)
+        df = pd.DataFrame(self._fill_log) if self._fill_log else pd.DataFrame()
+        self._fill_log = None
         return report, df
 
     def run_replay(
@@ -279,6 +388,8 @@ class BacktestEngine:
                         commission=self._commission.calculate(exit_notional, exit_type),
                         slippage_cost=self._slippage.cost(exit_notional, exit_type),
                     )
+                    if exit_reason == "tp":
+                        self.guards.record_tp(sym, pos.strategy, now)
                     import logging
                     logging.getLogger(__name__).warning(
                         "sync: %s 제거 (reason=%s, exit_price=%.4f)", sym, exit_reason, exit_price
@@ -295,6 +406,7 @@ class BacktestEngine:
         if local_last is None or local_now.date() != local_last.date():
             self.tracker.reset_daily()
             self._last_day = now
+            self._last_dd_alert = None
 
         # 가격 추출 (펀딩/MTM/TP-SL 공용)
         bars = self._get_bars(snapshot)
@@ -337,6 +449,7 @@ class BacktestEngine:
 
         # 3. 드로다운 체크
         dd_action = self.guards.check_daily_drawdown(state)
+        self._notify_drawdown_action(dd_action, state, now)
         if dd_action == DrawdownAction.STOP:
             # 강제 청산
             for sym in list(state.positions.keys()):
@@ -349,6 +462,15 @@ class BacktestEngine:
 
         # 4. 시장 국면 분류
         regime = self.regime_detector.classify(snapshot)
+        self._notify_blocked_trading_hours(now)
+
+        # 4.5 조기 청산(반대 신호) 체크
+        for sym, pos in list(state.positions.items()):
+            strategy_obj = next((s for s in self.strategies if s.name == pos.strategy), None)
+            if strategy_obj and hasattr(strategy_obj, "check_early_exit"):
+                if strategy_obj.check_early_exit(pos, snapshot):
+                    self._force_close(sym, prices.get(sym, pos.entry_price), now, "early_exit")
+        state = self.tracker.snapshot()
 
         # 5. 후보 시그널 수집 (전략 생성 or 리플레이 캐시)
         if self._replay_index is not None:
@@ -369,6 +491,18 @@ class BacktestEngine:
             if cb_status != BreakerStatus.ACTIVE:
                 continue
 
+            # TP 연장: 동일 방향 시그널 재발생 시 기존 포지션 TP 연장 (신규 진입 없음)
+            if self._tp_extend_on_signal:
+                existing = state.positions.get(cand["symbol"])
+                if existing is not None and existing.direction == cand["direction"]:
+                    mkt_p = prices.get(cand["symbol"], cand["entry_price"])
+                    shift_p = mkt_p - cand["entry_price"]
+                    new_tp = cand["tp_price"] + shift_p
+                    if (existing.direction == "long" and new_tp > existing.tp_price) or \
+                       (existing.direction == "short" and new_tp < existing.tp_price):
+                        existing.tp_price = new_tp
+                    continue  # 신규 진입 없음
+
             if not self.guards.is_entry_allowed(state, _cand_proxy(cand)):
                 continue
 
@@ -382,6 +516,16 @@ class BacktestEngine:
             if size_usd <= 0:
                 continue
 
+            # 불리 시간대 페널티: 해당 시간대이면 사이즈 50% 축소
+            penalty_hours = self._strategy_size_penalty.get(cand["strategy"])
+            if penalty_hours and now.hour in penalty_hours:
+                size_usd *= 0.5
+
+            # 유리 시간대 보너스: 해당 시간대이면 사이즈 N배 확대
+            bonus_hours = self._strategy_size_bonus.get(cand["strategy"])
+            if bonus_hours and now.hour in bonus_hours:
+                size_usd *= self._strategy_size_bonus_mult
+
             # Equity Curve Trading: equity < SMA(N) → 사이즈 50% 축소
             if self._equity_curve_trading > 0 and len(self._equity_history) >= self._equity_curve_trading:
                 sma = sum(self._equity_history[-self._equity_curve_trading:]) / self._equity_curve_trading
@@ -392,6 +536,13 @@ class BacktestEngine:
             if self._adx_scaling and hasattr(regime, 'adx'):
                 if 20 < regime.adx < 25:
                     size_usd *= 0.6
+
+            # 방향별 사이즈 배율: {"long": 0.5} → long 50%, {"short": 1.25} → short 125%
+            dir_mult = self._direction_size_mult.get(cand["direction"])
+            if dir_mult is not None:
+                size_usd *= dir_mult
+            if size_usd <= 0:
+                continue
 
             side = OrderSide.BUY if cand["direction"] == "long" else OrderSide.SELL
             mkt_price = prices.get(cand["symbol"], cand["entry_price"])
@@ -432,6 +583,21 @@ class BacktestEngine:
                 continue
             self.tracker.apply_fill(fill)
             state = self.tracker.snapshot()
+
+            if self._fill_log is not None:
+                sl_dist = abs(order.sl_price - order.price)
+                self._fill_log.append({
+                    "timestamp": now,
+                    "symbol": order.symbol,
+                    "strategy": order.strategy,
+                    "direction": order.direction,
+                    "entry_price": order.price,
+                    "tp_price": order.tp_price,
+                    "sl_price": order.sl_price,
+                    "sl_dist": sl_dist,
+                    "score": cand["score"],
+                    "tier": cand["tier"],
+                })
 
         # 6. 최종 MTM 재계산 후 자산곡선 기록 + early-stop 체크
         self._record_equity(now, prices)
@@ -674,9 +840,51 @@ class BacktestEngine:
             confluence_score=pos.confluence_score,
             commission=commission, slippage_cost=slippage,
         )
+
+        if exit_reason == "tp":
+            self.guards.record_tp(sym, pos.strategy, snapshot.timestamp)
+
         last_trade = self.ledger._records[-1] if self.ledger._records else None
         is_win = last_trade is not None and last_trade.pnl > 0
         self.circuit_breaker.record_result(pos.strategy, is_win)
+
+        # TP Reversal: TP 히트 시 반대 방향으로 동일 사이즈 진입
+        if (self._tp_reversal and exit_reason == "tp"
+                and sym not in self.tracker.snapshot().positions):
+            rev_dir = "short" if pos.direction == "long" else "long"
+            rev_side = OrderSide.SELL if pos.direction == "long" else OrderSide.BUY
+            rev_price = exit_price  # TP 가격에서 진입
+            atr_dist = abs(pos.tp_price - pos.entry_price)  # 원래 TP 거리
+            sl_dist  = abs(pos.entry_price - pos.sl_price)  # 원래 SL 거리
+            if rev_dir == "short":
+                rev_tp = rev_price - atr_dist
+                rev_sl = rev_price + sl_dist
+            else:
+                rev_tp = rev_price + atr_dist
+                rev_sl = rev_price - sl_dist
+            rev_size = pos.size_usd
+            _rev_sig = type('S', (), {
+                'direction': rev_dir, 'symbol': sym,
+                'strategy': pos.strategy + "_tprev",
+                'timestamp': snapshot.timestamp,
+            })()
+            if rev_size > 0 and self.guards.is_entry_allowed(
+                self.tracker.snapshot(), _rev_sig
+            ):
+                rev_order = Order(
+                    symbol=sym, side=rev_side, size_usd=rev_size,
+                    price=rev_price, order_type=OrderType.MARKET,
+                    leverage=pos.leverage,
+                    strategy=pos.strategy + "_tprev",
+                    signal_score=None, timestamp=snapshot.timestamp,
+                    direction=rev_dir, tp_price=rev_tp, sl_price=rev_sl,
+                )
+                current_bar = (
+                    snapshot.bars[sym]["1h"].iloc[-1]
+                    if "1h" in snapshot.bars.get(sym, {}) else None
+                )
+                fill = self.broker.submit(rev_order, current_bar)
+                self.tracker.apply_fill(fill)
 
         # SL Reversal: SL 히트 시 반대 방향으로 절반 사이즈 진입
         if (self._sl_reversal and exit_reason == "sl"

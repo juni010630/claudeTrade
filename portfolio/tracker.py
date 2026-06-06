@@ -81,10 +81,18 @@ class PortfolioTracker:
 
         if self.notifier is not None and getattr(self.notifier, "enabled", False):
             try:
-                # cash 기준 equity 추정 (MTM 재계산 전이므로 unrealized 미포함)
                 approx_equity = self.state.cash + sum(
                     p.unrealized_pnl for p in self.state.positions.values()
                 )
+                score = confluence_score
+                if score >= 6:
+                    tier = "SSS"
+                elif score >= 5:
+                    tier = "SS"
+                elif score >= 4:
+                    tier = "S"
+                else:
+                    tier = "A"
                 self.notifier.notify_exit(
                     symbol=symbol,
                     direction=pos.direction,
@@ -97,6 +105,9 @@ class PortfolioTracker:
                     entry_time=pos.opened_at,
                     exit_time=exit_time,
                     equity=approx_equity,
+                    strategy=pos.strategy,
+                    tier=tier,
+                    score=score,
                 )
             except Exception:
                 pass

@@ -36,12 +36,13 @@ class PositionSizer:
         self.max_notional_usd = max_notional_usd
         self.initial_capital = initial_capital  # 하위호환 보존 (사이징 미사용)
 
-    def _tier_params(self, tier: LeverageTier) -> tuple[int, float]:
-        """(leverage, size_fraction) 반환."""
+    def _tier_params(self, tier: LeverageTier) -> tuple[int, float, float]:
+        """(leverage, size_fraction, effective_risk_per_trade) 반환."""
         cfg = self._cfg.get(tier.value, {})
         leverage = int(cfg.get("leverage", 1))
         size_fraction = float(cfg.get("size_fraction", 0.0))
-        return leverage, size_fraction
+        rpt = float(cfg.get("risk_per_trade", self.risk_per_trade))
+        return leverage, size_fraction, rpt
 
     def calculate(
         self,
@@ -57,7 +58,7 @@ class PositionSizer:
         if tier == LeverageTier.NO_TRADE:
             return 0.0, 0
 
-        leverage, size_fraction = self._tier_params(tier)
+        leverage, size_fraction, effective_rpt = self._tier_params(tier)
 
         # equity 기반 sizing: 자본 증가 시 포지션도 비례 확대 (진정한 compound)
         # → 드로다운 시 자동 축소, Sharpe·MDD·return% 지표 왜곡 없음
@@ -66,12 +67,10 @@ class PositionSizer:
         # 명목 크기: 기준자본 × size_fraction × leverage
         notional = ref_capital * size_fraction * leverage
 
-        # 안전장치 1: 실제 손실이 risk_per_trade를 넘지 않도록 캡
-        # 손실(USD) = notional × risk_pct (notional은 이미 레버리지 포함)
-        # → notional ≤ ref_capital × risk_per_trade / risk_pct
+        # 안전장치 1: 실제 손실이 (티어별) risk_per_trade를 넘지 않도록 캡
         if entry_price > 0 and sl_price > 0 and entry_price != sl_price:
             risk_pct = abs(entry_price - sl_price) / entry_price
-            max_notional_by_risk = (ref_capital * self.risk_per_trade) / risk_pct
+            max_notional_by_risk = (ref_capital * effective_rpt) / risk_pct
             notional = min(notional, max_notional_by_risk)
 
         # 안전장치 2: 기준자본 대비 notional 하드캡 (초과 레버리지 방지)
