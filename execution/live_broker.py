@@ -34,13 +34,19 @@ class LiveBroker:
         dry_run: bool = False,
         notifier: Optional[TelegramNotifier] = None,
         equity_provider=None,
+        commission_maker: float = 0.0002,
+        commission_taker: float = 0.0005,
+        slippage_bps: float = 5.0,
     ) -> None:
         self.exchange = exchange
         self.dry_run = dry_run
         self._leverage_cache: dict[str, int] = {}
-        # BacktestEngine 이 참조하는 속성 (수수료 계산용)
-        self.commission = CommissionModel(maker_rate=0.0002, taker_rate=0.0005)
-        self.slippage   = SlippageModel(default_bps=2.0)  # 라이브는 슬리피지 낮음
+        # BacktestEngine 이 참조하는 속성 (수수료/슬리피지 계산용).
+        # 백테스트와 동일한 모델을 써야 청산 비용 계산이 일치한다.
+        # (진입 슬리피지는 실제 체결가에 이미 반영되어 submit()에서 slippage_cost=0 처리.
+        #  청산은 엔진이 broker.slippage.cost로 계산하므로 config 값과 맞춰야 한다.)
+        self.commission = CommissionModel(maker_rate=commission_maker, taker_rate=commission_taker)
+        self.slippage   = SlippageModel(default_bps=slippage_bps)
         self.notifier = notifier
         self.equity_provider = equity_provider  # callable -> float (현재 자본)
 

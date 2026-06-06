@@ -116,7 +116,7 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
             primary_symbol=symbols[0],
             adx_period=rg.get("adx_period", 14),
             adx_trending_threshold=rg.get("adx_trending_threshold", 25.0),
-            adx_ranging_threshold=rg.get("adx_ranging_threshold", 15.0),
+            adx_ranging_threshold=rg.get("adx_ranging_threshold", 20.0),
             bb_period=rg.get("bb_period", 20),
             bb_std=rg.get("bb_std", 2.0),
             bb_width_lookback=rg.get("bb_width_lookback", 50),
@@ -125,7 +125,7 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         ),
         confluence_scorer=ConfluenceScorer(
             volume_ratio_threshold=sc.get("volume_ratio_threshold", 1.5),
-            rsi_long_max=sc.get("rsi_long_max", 70.0),
+            rsi_long_max=sc.get("rsi_long_max", 65.0),
             rsi_short_min=sc.get("rsi_short_min", 35.0),
             funding_long_max=sc.get("funding_long_max", 0.0003),
             funding_short_min=sc.get("funding_short_min", -0.0003),
@@ -133,15 +133,16 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
             tier_sss_min_score=sc.get("tier_sss_min_score", 99),
             tier_ss_min_score=sc.get("tier_ss_min_score", 7),
             tier_s_min_score=sc.get("tier_s_min_score", 5),
-            tier_a_min_score=sc.get("tier_a_min_score", 4),
+            tier_a_min_score=sc.get("tier_a_min_score", 3),
             tier_b_min_score=sc.get("tier_b_min_score", 2),
             tier_c_min_score=sc.get("tier_c_min_score", 1),
+            rsi_neutral_penalty=tuple(sc["rsi_neutral_penalty"]) if sc.get("rsi_neutral_penalty") else None,
         ),
         risk_guards=RiskGuards(
-            max_positions=r.get("max_positions", 6),
-            max_same_direction=r.get("max_same_direction", 4),
-            daily_pause_threshold=r.get("daily_drawdown_pause", -0.04),
-            daily_stop_threshold=r.get("daily_drawdown_stop", -0.12),
+            max_positions=r.get("max_positions", 4),
+            max_same_direction=r.get("max_same_direction", 3),
+            daily_pause_threshold=r.get("daily_drawdown_pause", -0.05),
+            daily_stop_threshold=r.get("daily_drawdown_stop", -0.08),
             tp_cooldown_hours=r.get("tp_cooldown_hours", 0.0),
         ),
         circuit_breaker=CircuitBreaker(
@@ -154,9 +155,10 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
             lookback=r.get("correlation_lookback", 100),
         ),
         position_sizer=PositionSizer(
-            risk_per_trade=r.get("risk_per_trade", 0.010),
+            risk_per_trade=r.get("risk_per_trade", 0.01),
             tier_config=p.get("leverage_tiers"),
             max_notional_usd=r.get("max_notional_usd"),
+            max_notional_equity_mult=r.get("max_notional_equity_mult", 3.0),
         ),
         broker=broker,
         funding_simulator=FundingRateSimulator(
@@ -169,6 +171,11 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         strategy_block_hours=p.get("strategy_block_hours"),
         strategy_block_symbols=p.get("strategy_block_symbols"),
         tier_block_symbols=p.get("tier_block_symbols"),
+        symbol_block_directions=p.get("symbol_block_directions"),
+        direction_size_mult=p.get("direction_size_mult"),
+        strategy_size_penalty=p.get("strategy_size_penalty"),
+        strategy_size_bonus=p.get("strategy_size_bonus"),
+        strategy_size_bonus_mult=p.get("strategy_size_bonus_mult", 1.5),
         notifier=notifier,
         trade_log_path="trades.csv",
     )
@@ -219,9 +226,15 @@ def main() -> None:
     else:
         logger.info("텔레그램 알림 비활성 (TELEGRAM_BOT_TOKEN/CHAT_ID 미설정)")
 
-    # Exchange + Broker 생성
+    # Exchange + Broker 생성 (수수료/슬리피지는 백테스트와 동일하게 config 값 사용)
+    exec_cfg = params.get("execution", {})
     exchange = build_exchange(demo=demo)
-    broker   = LiveBroker(exchange, dry_run=dry_run, notifier=notifier)
+    broker   = LiveBroker(
+        exchange, dry_run=dry_run, notifier=notifier,
+        commission_maker=exec_cfg.get("commission_maker", 0.0002),
+        commission_taker=exec_cfg.get("commission_taker", 0.0005),
+        slippage_bps=exec_cfg.get("default_slippage_bps", 5.0),
+    )
 
     # 잔고 확인 (엔진 초기 자본으로 사용)
     usdt = None
