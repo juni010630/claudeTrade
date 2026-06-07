@@ -195,6 +195,73 @@ class LiveBroker:
         self._notify_entry(order, fill_price)
         return fill
 
+    # ── 피라미딩 증액 주문 ────────────────────────────────────────────
+    def place_pyramid_add(
+        self, symbol: str, direction: str, trigger_price: float,
+        add_size_usd: float, leverage: int,
+    ) -> None:
+        """진입 직후 호출 — 트리거가에 STOP_MARKET(비-reduceOnly) 증액 주문 등록.
+
+        백테스트의 intrabar stop-market 체결과 동일 의미론.
+        실패 시 에러 로그만 (포지션 자체는 유효 — 백테와 증액분만 괴리).
+        """
+        side = "buy" if direction == "long" else "sell"
+        qty = add_size_usd / trigger_price
+        try:
+            qty = self.exchange.amount_to_precision(symbol, qty)
+        except Exception:
+            qty = round(qty, 6)
+        if self.dry_run:
+            logger.info("[DRY] PYRAMID 주문: %s %s qty=%s stop@%.4f", symbol, side, qty, trigger_price)
+            return
+        try:
+            self.exchange.create_order(
+                symbol, "STOP_MARKET", side, float(qty),
+                None, {"stopPrice": float(trigger_price)},
+            )
+            logger.info("PYRAMID(STOP_MARKET) 등록: %s %s qty=%s @%.4f",
+                        symbol, side, qty, trigger_price)
+        except Exception as e:
+            logger.error("PYRAMID 주문 등록 실패 %s @%.4f — %s: %s (백테 대비 증액 누락 주의)",
+                         symbol, trigger_price, type(e).__name__, e)
+
+    def refresh_tp_sl_after_add(
+        self, symbol: str, direction: str, qty_total: float,
+        tp_price: float, sl_price: float,
+    ) -> None:
+        """증액 체결 후 호출 — 기존 TP/SL(원 수량)을 취소하고 총 수량으로 재등록."""
+        if self.dry_run:
+            logger.info("[DRY] TP/SL 재등록: %s qty=%.6f tp=%.4f sl=%.4f",
+                        symbol, qty_total, tp_price, sl_price)
+            return
+        close_side = "sell" if direction == "long" else "buy"
+        try:
+            self.exchange.cancel_all_orders(symbol)
+        except Exception as e:
+            logger.warning("증액 후 주문 취소 실패 %s: %s", symbol, e)
+        try:
+            qty = self.exchange.amount_to_precision(symbol, qty_total)
+        except Exception:
+            qty = round(qty_total, 6)
+        if tp_price > 0:
+            try:
+                self.exchange.create_order(
+                    symbol, "limit", close_side, float(qty), float(tp_price),
+                    {"reduceOnly": True},
+                )
+                logger.info("TP 재등록(증액 반영): %s qty=%s @%.4f", symbol, qty, tp_price)
+            except Exception as e:
+                logger.error("TP 재등록 실패 %s: %s", symbol, e)
+        if sl_price > 0:
+            try:
+                self.exchange.create_order(
+                    symbol, "STOP_MARKET", close_side, float(qty),
+                    None, {"stopPrice": float(sl_price), "reduceOnly": "true"},
+                )
+                logger.info("SL 재등록(증액 반영): %s qty=%s @%.4f", symbol, qty, sl_price)
+            except Exception as e:
+                logger.error("SL 재등록 실패 %s: %s", symbol, e)
+
     def _notify_entry(self, order: Order, fill_price: float) -> None:
         if self.notifier is None or not self.notifier.enabled:
             return

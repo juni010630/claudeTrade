@@ -66,6 +66,8 @@ class BacktestEngine:
         strategy_block_symbols: dict[str, list[str]] | None = None,  # 전략별 차단 심볼
         tier_block_symbols: dict[str, list[str]] | None = None,  # 티어별 차단 심볼 (e.g. {"S": ["ADAUSDT"]})
         symbol_block_directions: dict[str, list[str]] | None = None,  # 심볼별 차단 방향 (e.g. {"ETHUSDT": ["long"]})
+        strategy_block_tiers: dict[str, list[str]] | None = None,  # 전략별 차단 티어 (e.g. {"ema_cross": ["S"]})
+        block_weekdays: list[int] | None = None,  # 차단 요일 (0=월 ~ 6=일, 진입 봉 UTC 기준)
         direction_size_mult: dict[str, float] | None = None,          # 방향별 사이즈 배율 (e.g. {"long": 0.5, "short": 1.25})
         strategy_size_penalty: dict[str, list[int]] | None = None,  # 전략별 불리 시간대 → 사이즈 50% 축소
         strategy_size_bonus: dict[str, list[int]] | None = None,   # 전략별 유리 시간대 → 사이즈 N배 확대
@@ -79,6 +81,11 @@ class BacktestEngine:
         sl_reversal_leverage: int = 10,  # reversal 포지션 레버리지 (기본 10x)
         tp_reversal: bool = False,       # True → TP 히트 시 반대 방향 동일 사이즈 진입
         tp_extend_on_signal: bool = False,  # True → 동일 방향 재시그널 시 TP 연장 (신규 진입 없음)
+        pyramid_trigger_r: float | None = None,  # 평단 +N×R 도달 시 피라미딩 증액 (None=비활성)
+        pyramid_add_fraction: float = 0.5,       # 증액 비율 (현재 사이즈 대비)
+        pyramid_max_adds: int = 1,               # 최대 증액 횟수
+        pyramid_strategies: list[str] | None = None,  # 증액 허용 전략 (None=전체)
+        pyramid_min_score: int | None = None,         # 증액 최소 confluence score (None=전체)
         notifier=None,
         trade_log_path: str | None = None,  # CSV 거래 로그 경로 (라이브용)
     ) -> None:
@@ -114,6 +121,10 @@ class BacktestEngine:
         self._symbol_block_directions: dict[str, set[str]] = {
             k: set(v) for k, v in (symbol_block_directions or {}).items()
         }
+        self._strategy_block_tiers: dict[str, set[str]] = {
+            k: set(v) for k, v in (strategy_block_tiers or {}).items()
+        }
+        self._block_weekdays: set[int] = set(block_weekdays or [])
         self._direction_size_mult: dict[str, float] = direction_size_mult or {}
         self._strategy_size_penalty: dict[str, set[int]] = {
             k: set(v) for k, v in (strategy_size_penalty or {}).items()
@@ -133,6 +144,11 @@ class BacktestEngine:
         self._sl_reversal_leverage = sl_reversal_leverage
         self._tp_reversal = tp_reversal
         self._tp_extend_on_signal = tp_extend_on_signal
+        self._pyramid_trigger_r = pyramid_trigger_r
+        self._pyramid_add_fraction = pyramid_add_fraction
+        self._pyramid_max_adds = pyramid_max_adds
+        self._pyramid_strategies = set(pyramid_strategies) if pyramid_strategies else None
+        self._pyramid_min_score = pyramid_min_score
         self._equity_history: list[float] = []
 
         # 시그널 덤프/리플레이 모드
@@ -156,7 +172,6 @@ class BacktestEngine:
 
         self._last_day: pd.Timestamp | None = None
         self._last_dd_alert: DrawdownAction | None = None
-        self._last_block_hour_alerts: set[tuple[str, pd.Timestamp]] = set()
 
     def _localize(self, ts: pd.Timestamp) -> pd.Timestamp:
         """daily_reset_tz 기준 로컬 시간으로 변환."""
@@ -221,34 +236,6 @@ class BacktestEngine:
             f"포지션: {state.open_position_count}개"
         )
 
-    def _notify_blocked_trading_hours(self, now: pd.Timestamp) -> None:
-        if self.notifier is None or not getattr(self.notifier, "enabled", False):
-            return
-        if not self._strategy_block_hours:
-            return
-
-        blocked = [
-            strategy
-            for strategy, hours in self._strategy_block_hours.items()
-            if now.hour in hours
-        ]
-        if not blocked:
-            return
-
-        hour_key = now.floor("h")
-        for strategy in blocked:
-            key = (strategy, hour_key)
-            if key in self._last_block_hour_alerts:
-                continue
-            self._last_block_hour_alerts.add(key)
-            hours = sorted(self._strategy_block_hours.get(strategy, set()))
-            self._notify_info(
-                f"⏸ <b>매매 차단 시간대</b>\n"
-                f"시간: {now.strftime('%Y-%m-%d %H:%M')} UTC\n"
-                f"전략: {strategy}\n"
-                f"차단 시간: {', '.join(f'{h:02d}:00' for h in hours)} UTC"
-            )
-
     # ── 시그널 덤프/리플레이 ─────────────────────────────────────
     def _generate_all_candidates(
         self, snapshot: MarketSnapshot, regime, prices: dict[str, float],
@@ -272,6 +259,11 @@ class BacktestEngine:
                     continue
                 min_req = self._strategy_min_score.get(strategy.name)
                 if min_req is not None and scored.total < min_req:
+                    continue
+                if self._block_weekdays and signal.timestamp.weekday() in self._block_weekdays:
+                    continue
+                blocked_tiers = self._strategy_block_tiers.get(strategy.name)
+                if blocked_tiers and scored.tier.value in blocked_tiers:
                     continue
                 blocked = self._strategy_block_hours.get(strategy.name)
                 if blocked and signal.timestamp.hour in blocked:
@@ -325,9 +317,10 @@ class BacktestEngine:
         entries_df 컬럼:
           timestamp, symbol, strategy, direction,
           entry_price, tp_price, sl_price, sl_dist (= ATR * sl_mult),
-          score, tier
+          score, tier, regime, adx, bb_width_pct
 
         sl_dist / orig_sl_mult = ATR → TP/SL 배수 스윕 시 ATR 역산 가능.
+        regime/adx/bb_width_pct = 진입 봉 국면 컨텍스트 → 적응형 TP/SL 조건 변수.
         """
         self._fill_log = []
         report = self.run(snapshots)
@@ -390,6 +383,13 @@ class BacktestEngine:
                     )
                     if exit_reason == "tp":
                         self.guards.record_tp(sym, pos.strategy, now)
+                    # 잔여 주문 정리 — 특히 비-reduceOnly 피라미드 STOP은
+                    # 포지션 청산 후에도 살아남아 고아 포지션을 열 수 있음
+                    if hasattr(self.broker, "cancel_all_orders"):
+                        try:
+                            self.broker.cancel_all_orders(sym)
+                        except Exception:
+                            pass
                     import logging
                     logging.getLogger(__name__).warning(
                         "sync: %s 제거 (reason=%s, exit_price=%.4f)", sym, exit_reason, exit_price
@@ -462,7 +462,6 @@ class BacktestEngine:
 
         # 4. 시장 국면 분류
         regime = self.regime_detector.classify(snapshot)
-        self._notify_blocked_trading_hours(now)
 
         # 4.5 조기 청산(반대 신호) 체크
         for sym, pos in list(state.positions.items()):
@@ -584,6 +583,27 @@ class BacktestEngine:
             self.tracker.apply_fill(fill)
             state = self.tracker.snapshot()
 
+            # 피라미딩: 라이브 브로커면 트리거가에 STOP_MARKET 증액 주문을 미리 등록
+            # (백테스트는 _try_pyramid_add가 봉 high/low로 동일 의미론 처리)
+            new_pos = state.positions.get(order.symbol)
+            if (new_pos is not None and self._pyramid_eligible(new_pos)
+                    and hasattr(self.broker, "place_pyramid_add")):
+                _risk = abs(new_pos.entry_price - new_pos.initial_sl_price)
+                if _risk > 0:
+                    _trig = (new_pos.entry_price + self._pyramid_trigger_r * _risk
+                             if new_pos.direction == "long"
+                             else new_pos.entry_price - self._pyramid_trigger_r * _risk)
+                    try:
+                        self.broker.place_pyramid_add(
+                            new_pos.symbol, new_pos.direction, _trig,
+                            new_pos.size_usd * self._pyramid_add_fraction,
+                            new_pos.leverage,
+                        )
+                    except Exception as e:
+                        import logging
+                        logging.getLogger(__name__).error(
+                            "피라미드 주문 등록 실패 %s: %s", new_pos.symbol, e)
+
             if self._fill_log is not None:
                 sl_dist = abs(order.sl_price - order.price)
                 self._fill_log.append({
@@ -597,6 +617,11 @@ class BacktestEngine:
                     "sl_dist": sl_dist,
                     "score": cand["score"],
                     "tier": cand["tier"],
+                    # 진입 봉 시점 국면/변동성 컨텍스트 (적응형 TP/SL 조건 변수)
+                    # 모두 진입 봉까지의 데이터로 계산됨 → look-ahead 없음
+                    "regime": regime.regime.value,
+                    "adx": regime.adx,
+                    "bb_width_pct": regime.bb_width_pct,
                 })
 
         # 6. 최종 MTM 재계산 후 자산곡선 기록 + early-stop 체크
@@ -700,6 +725,12 @@ class BacktestEngine:
             high = float(bar["high"])
             low = float(bar["low"])
 
+            # 피라미딩 증액 (SL/TP 판정 전 실행 — 같은 봉 SL 동시 터치 시
+            # 증액분 손실까지 인정하는 비관적 순서 → 1h 결과 뻥튀기 방지.
+            # TP는 트리거보다 먼 같은 방향 가격이라 트리거 선행이 항상 옳음)
+            if self._pyramid_eligible(pos):
+                self._try_pyramid_add(pos, float(bar["open"]), high, low)
+
             if pos.direction == "long":
                 hit_sl = low <= pos.sl_price
                 hit_tp = high >= pos.tp_price
@@ -735,6 +766,10 @@ class BacktestEngine:
             sb_high = float(sb["high"])
             sb_low = float(sb["low"])
 
+            # 피라미딩 증액 (bar-level과 동일한 비관적 순서: 트리거 → SL/TP)
+            if self._pyramid_eligible(pos):
+                self._try_pyramid_add(pos, float(sb["open"]), sb_high, sb_low)
+
             # ① 현재 SL/TP 체크
             if pos.direction == "long":
                 sub_hit_sl = sb_low <= pos.sl_price
@@ -757,6 +792,52 @@ class BacktestEngine:
         if hit_time:
             return bar_close, "timeout"
         return None
+
+    def _pyramid_eligible(self, pos) -> bool:
+        if self._pyramid_trigger_r is None or pos.adds_done >= self._pyramid_max_adds:
+            return False
+        if self._pyramid_strategies is not None and pos.strategy not in self._pyramid_strategies:
+            return False
+        if self._pyramid_min_score is not None and pos.confluence_score < self._pyramid_min_score:
+            return False
+        return True
+
+    def _try_pyramid_add(self, pos, open_: float, high: float, low: float) -> None:
+        """봉 내 트리거(평단 ± trigger_r×초기R) 터치 시 증액.
+
+        stop-market 의미론: 갭으로 open이 트리거를 지나쳤으면 open 체결 (보수적).
+        TP/SL 가격은 불변 (순수 정적 유지). look-ahead 없음 — 진입봉 이후의
+        high/low만 사용, 트리거가는 진입 시점 정보로만 계산.
+        """
+        initial_risk = abs(pos.entry_price - pos.initial_sl_price)
+        if initial_risk <= 0:
+            return
+        if pos.direction == "long":
+            trig = pos.entry_price + self._pyramid_trigger_r * initial_risk
+            if high < trig:
+                return
+            fill = max(open_, trig)
+        else:
+            trig = pos.entry_price - self._pyramid_trigger_r * initial_risk
+            if low > trig:
+                return
+            fill = min(open_, trig)
+        add_size = pos.size_usd * self._pyramid_add_fraction
+        self.tracker.add_to_position(
+            pos.symbol, fill, add_size,
+            commission=self._commission.calculate(add_size, OrderType.MARKET),
+            slippage_cost=self._slippage.cost(add_size, OrderType.MARKET),
+        )
+        # 라이브: 거래소 STOP 증액이 intrabar에 이미 체결됨 → TP/SL을 총 수량으로 교체
+        if hasattr(self.broker, "refresh_tp_sl_after_add"):
+            try:
+                q_total = pos.size_usd / pos.entry_price  # 조화평균 평단 → 정확한 코인 수량
+                self.broker.refresh_tp_sl_after_add(
+                    pos.symbol, pos.direction, q_total, pos.tp_price, pos.sl_price)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    "증액 후 TP/SL 재등록 실패 %s: %s", pos.symbol, e)
 
     def _update_trailing_for_pos(self, pos, high: float, low: float) -> None:
         """단일 봉(또는 sub-bar)의 high/low로 peak + breakeven + trailing 업데이트."""

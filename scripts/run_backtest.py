@@ -28,6 +28,7 @@ from risk.guards import RiskGuards
 from risk.position_sizer import PositionSizer
 from signals.scorer import ConfluenceScorer
 from strategies.ema_cross import EMACrossStrategy
+from strategies.mean_reversion import MeanReversionStrategy
 from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
 
 import pandas as pd
@@ -47,7 +48,9 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
     # ------------------------------------------------------------------
     strategy_map = {
         "ema_cross":          EMACrossStrategy,
+        "ema_cross_slow":     EMACrossStrategy,   # 다중 속도 변형 (strategy_name으로 구분)
         "multi_tf_breakout":  MultiTFBreakoutStrategy,
+        "mean_reversion":     MeanReversionStrategy,
     }
     strategies = []
     for key, cls in strategy_map.items():
@@ -74,13 +77,20 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
             from strategies.ml_filter import MLModels, MLSignalFilter
             model_path = ml_cfg.get("model_path", "models/ml_filter.pkl")
             models = MLModels.load(model_path)
+            ml_mode = ml_cfg.get("mode", "bonus")
+            cut_threshold = ml_cfg.get("cut_threshold", 0.45)
             ml_filter = MLSignalFilter(
                 models=models,
-                clf_threshold=0.0,  # soft scoring이므로 차단 없음
+                clf_threshold=cut_threshold if ml_mode == "hardcut" else 0.0,
             )
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning("ML 모델 로드 실패: %s — ML 보너스 비활성", e)
+            logging.getLogger(__name__).warning("ML 모델 로드 실패: %s — ML 비활성", e)
+            ml_mode = "bonus"
+            cut_threshold = 0.45
+    else:
+        ml_mode = "bonus"
+        cut_threshold = 0.45
 
     # ------------------------------------------------------------------
     # 체결 비용 모델
@@ -124,9 +134,13 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
             tier_a_min_score=sc.get("tier_a_min_score", 3),
             tier_b_min_score=sc.get("tier_b_min_score", 2),
             tier_c_min_score=sc.get("tier_c_min_score", 1),
+            regime_strong_adx=sc.get("regime_strong_adx"),
+            regime_high_adx_cutoff=sc.get("regime_high_adx_cutoff"),
             ml_filter=ml_filter,
             ml_bonus_threshold_1=ml_cfg.get("bonus_threshold_1", 0.6),
             ml_bonus_threshold_2=ml_cfg.get("bonus_threshold_2", 0.75),
+            ml_mode=ml_mode,
+            ml_cut_threshold=cut_threshold,
             rsi_neutral_penalty=tuple(sc["rsi_neutral_penalty"]) if sc.get("rsi_neutral_penalty") else None,
         ),
         risk_guards=RiskGuards(
@@ -163,12 +177,23 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         strategy_block_symbols=p.get("strategy_block_symbols"),
         tier_block_symbols=p.get("tier_block_symbols"),
         symbol_block_directions=p.get("symbol_block_directions"),
+        strategy_block_tiers=p.get("strategy_block_tiers"),
+        block_weekdays=p.get("block_weekdays"),
         direction_size_mult=p.get("direction_size_mult"),
         strategy_size_penalty=engine_kwargs.pop("strategy_size_penalty", p.get("strategy_size_penalty")),
         strategy_size_bonus=engine_kwargs.pop("strategy_size_bonus", p.get("strategy_size_bonus")),
         strategy_size_bonus_mult=engine_kwargs.pop("strategy_size_bonus_mult", p.get("strategy_size_bonus_mult", 1.5)),
         tp_reversal=engine_kwargs.pop("tp_reversal", False),
         tp_extend_on_signal=engine_kwargs.pop("tp_extend_on_signal", False),
+        pyramid_trigger_r=(p.get("pyramid", {}).get("trigger_r")
+                           if p.get("pyramid", {}).get("enabled") else None),
+        pyramid_add_fraction=p.get("pyramid", {}).get("add_fraction", 0.5),
+        pyramid_max_adds=p.get("pyramid", {}).get("max_adds", 1),
+        pyramid_strategies=p.get("pyramid", {}).get("strategies"),
+        pyramid_min_score=p.get("pyramid", {}).get("min_score"),
+        equity_curve_trading=engine_kwargs.pop("equity_curve_trading",
+                                               p.get("equity_curve_trading", 0)),
+        adx_scaling=engine_kwargs.pop("adx_scaling", p.get("adx_scaling", False)),
         abort_mdd_threshold=abort_mdd,
         isolated_margin=isolated_margin,
         **engine_kwargs,

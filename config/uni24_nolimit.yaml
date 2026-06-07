@@ -1,3 +1,4 @@
+# uni24_nolimit — config/universe24.yaml + 포지션 개수 제한 해제 (mp/msd 99)
 backtest:
   end: '2026-04-14'
   initial_capital: 100
@@ -33,9 +34,16 @@ leverage_tiers:
     size_fraction: 0.3
   SSS:
     leverage: 50
+    risk_per_trade: 0.2
     size_fraction: 0.3
-    risk_per_trade: 0.20
 primary_timeframe: 1h
+pyramid:
+  add_fraction: 0.25
+  enabled: true
+  max_adds: 1
+  strategies:
+  - ema_cross
+  trigger_r: 1.0
 regime:
   adx_period: 14
   adx_ranging_threshold: 12.0
@@ -53,30 +61,30 @@ risk:
   correlation_lookback: 100
   daily_drawdown_pause: -0.04
   daily_drawdown_stop: -0.1
-  max_positions: 7
-  max_same_direction: 5
+  max_positions: 99
+  max_same_direction: 99
   risk_per_trade: 0.099
   tp_cooldown_hours: 6.0
 scorer:
   daily_ema_period: 200
   funding_long_max: 0.0003
   funding_short_min: -0.0003
+  ml_soft_scoring:
+    bonus_threshold_1: 0.6
+    bonus_threshold_2: 0.75
+    cut_threshold: 0.45
+    enabled: false
+    mode: bonus
+    model_path: models/ml_filter.pkl
   rsi_long_max: 70.0
   rsi_short_min: 40.0
   tier_a_min_score: 3
   tier_b_min_score: 99
   tier_c_min_score: 99
   tier_s_min_score: 4
-  tier_sss_min_score: 6
   tier_ss_min_score: 5
+  tier_sss_min_score: 6
   volume_ratio_threshold: 1.8
-  ml_soft_scoring:
-    enabled: false          # 검증 통과 후 true로 변경
-    model_path: models/ml_filter.pkl
-    mode: bonus             # bonus | hardcut
-    bonus_threshold_1: 0.6
-    bonus_threshold_2: 0.75
-    cut_threshold: 0.45     # hardcut 모드 전용
 strategies:
   ema_cross:
     atr_period: 14
@@ -151,11 +159,6 @@ strategy_size_bonus:
   - 14
   - 22
 strategy_size_bonus_mult: 1.25
-tier_block_symbols:
-  S:
-  - ADAUSDT
-# BTC 숏 차단 — PF 2.51(포트폴리오 평균 3.49 미달) 저PF 버킷, 기회비용.
-# 연도별 검증: 2022/2024/2025-26 개선, 2023 중립. 단독 필터 중 유일하게 강건.
 symbol_block_directions:
   BTCUSDT:
   - short
@@ -166,6 +169,27 @@ symbols:
 - ARBUSDT
 - FILUSDT
 - ADAUSDT
+- ZECUSDT
+- SOLUSDT
+- XRPUSDT
+- BNBUSDT
+- NEARUSDT
+- XLMUSDT
+- AVAXUSDT
+- LINKUSDT
+- LTCUSDT
+- BCHUSDT
+- AAVEUSDT
+- DOTUSDT
+- TRXUSDT
+- DASHUSDT
+- XMRUSDT
+- UNIUSDT
+- ICPUSDT
+- HBARUSDT
+tier_block_symbols:
+  S:
+  - ADAUSDT
 timeframes:
 - 1h
 - 4h

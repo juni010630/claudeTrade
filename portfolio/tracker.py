@@ -41,6 +41,7 @@ class PortfolioTracker:
             entry_commission=fill.commission,
             entry_slippage=fill.slippage_cost,
             confluence_score=(order.signal_score.total if order.signal_score else 0),
+            order_price=order.price,
         )
         self.state.positions[order.symbol] = pos
         self.state.cash -= fill.total_cost  # 진입 수수료+슬리피지 즉시 차감
@@ -93,6 +94,11 @@ class PortfolioTracker:
                     tier = "S"
                 else:
                     tier = "A"
+                # 진입 슬리피지% = (실제체결가 - 의도가)/의도가, 불리한 방향이 +
+                slip_pct = None
+                if pos.order_price > 0:
+                    raw_slip = (pos.entry_price - pos.order_price) / pos.order_price * 100
+                    slip_pct = raw_slip if pos.direction == "long" else -raw_slip
                 self.notifier.notify_exit(
                     symbol=symbol,
                     direction=pos.direction,
@@ -108,6 +114,8 @@ class PortfolioTracker:
                     strategy=pos.strategy,
                     tier=tier,
                     score=score,
+                    entry_slip_pct=slip_pct,
+                    commission=pos.entry_commission + commission,
                 )
             except Exception:
                 pass
@@ -130,6 +138,7 @@ class PortfolioTracker:
             exit_reason=exit_reason,
             regime_at_entry=regime,
             confluence_score=confluence_score,
+            order_price=pos.order_price,
         )
         self.ledger.append(record)
         hold_h = (exit_time - pos.opened_at).total_seconds() / 3600
@@ -139,6 +148,35 @@ class PortfolioTracker:
             pos.entry_price, exit_price,
             realized_pnl, realized_pnl / pos.size_usd * 100,
             exit_reason, hold_h,
+        )
+
+    def add_to_position(
+        self,
+        symbol: str,
+        add_price: float,
+        add_size_usd: float,
+        commission: float = 0.0,
+        slippage_cost: float = 0.0,
+    ) -> None:
+        """피라미딩 증액 — USD 명목 기준 조화평균으로 평단 갱신.
+
+        q = size/price (코인 수량) 합산 후 avg = total_size/total_q
+        → close_position의 notional PnL 식이 트랜치별 PnL 합과 정확히 일치.
+        """
+        pos = self.state.positions.get(symbol)
+        if pos is None:
+            return
+        q_total = pos.size_usd / pos.entry_price + add_size_usd / add_price
+        pos.size_usd += add_size_usd
+        pos.entry_price = pos.size_usd / q_total
+        pos.entry_commission += commission
+        pos.entry_slippage += slippage_cost
+        pos.adds_done += 1
+        self.state.cash -= commission + slippage_cost
+        logger.info(
+            "PYRAMID %s %s | add $%.2f @ %.4f → size $%.2f avg %.4f",
+            symbol, pos.direction, add_size_usd, add_price,
+            pos.size_usd, pos.entry_price,
         )
 
     def apply_funding(self, accruals: dict[str, float]) -> None:

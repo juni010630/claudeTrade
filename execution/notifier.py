@@ -130,6 +130,8 @@ class TelegramNotifier:
         cum_trades: int = 0,
         cum_wr: float = 0.0,
         cum_pnl: float = 0.0,
+        entry_slip_pct: float | None = None,
+        commission: float = 0.0,
     ) -> None:
         reason_map = {
             "tp":          ("🎯", "익절"),
@@ -150,6 +152,9 @@ class TelegramNotifier:
         arrow = "📈" if direction == "long" else "📉"
 
         strat_info = f"  <i>{strategy} {tier}({score})</i>" if strategy else ""
+        slip_info = ""
+        if entry_slip_pct is not None:
+            slip_info = f"\n슬리피지(진입): {entry_slip_pct:+.3f}% · 수수료: ${commission:,.3f}"
         cum_info = ""
         if cum_trades > 0:
             cum_info = (
@@ -164,7 +169,7 @@ class TelegramNotifier:
             f"청산: <code>{exit_price:,.4f}</code> ({pct:+.2f}%)\n"
             f"PnL: <b>{pnl:+,.2f} USDT</b>  "
             f"(레버리지 {lev_pct:+.1f}% / 자본 {pnl_pct_equity:+.2f}%)\n"
-            f"보유: {h}h {m}m\n"
+            f"보유: {h}h {m}m{slip_info}\n"
             f"잔고: ${equity:,.2f}{cum_info}"
         )
         self.send(text)

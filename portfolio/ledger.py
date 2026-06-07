@@ -33,12 +33,14 @@ class TradeRecord:
     exit_reason: str          # "tp" | "sl" | "forced"
     regime_at_entry: MarketRegime
     confluence_score: int
+    order_price: float = 0.0  # 진입 의도가 (슬리피지 측정용; 0=미기록)
 
 
 _CSV_FIELDS = [
     "trade_id", "entry_time", "exit_time", "symbol", "strategy", "direction",
     "entry_price", "exit_price", "size_usd", "leverage", "pnl",
     "exit_reason", "confluence_score", "commission", "slippage_cost", "funding_paid",
+    "order_price",
 ]
 
 
@@ -47,6 +49,14 @@ class Ledger:
         self._records: list[TradeRecord] = []
         self._counter = 0
         self._csv_path = Path(csv_path) if csv_path else None
+        # 재시작 시 trade_id 연속성 복구 — 기존 CSV 행수(헤더 제외)로 카운터 초기화
+        # (없으면 0부터 → 재시작마다 1로 리셋되어 trades.csv에 id 중복되던 버그 수정)
+        if self._csv_path is not None and self._csv_path.exists():
+            try:
+                with open(self._csv_path) as f:
+                    self._counter = max(0, sum(1 for _ in f) - 1)
+            except Exception as e:
+                logger.warning("ledger 카운터 복구 실패: %s", e)
 
     def append(self, record: TradeRecord) -> None:
         self._counter += 1

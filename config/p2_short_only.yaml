@@ -31,10 +31,6 @@ leverage_tiers:
   SS:
     leverage: 40
     size_fraction: 0.3
-  SSS:
-    leverage: 50
-    size_fraction: 0.3
-    risk_per_trade: 0.20
 primary_timeframe: 1h
 regime:
   adx_period: 14
@@ -67,16 +63,8 @@ scorer:
   tier_b_min_score: 99
   tier_c_min_score: 99
   tier_s_min_score: 4
-  tier_sss_min_score: 6
   tier_ss_min_score: 5
   volume_ratio_threshold: 1.8
-  ml_soft_scoring:
-    enabled: false          # 검증 통과 후 true로 변경
-    model_path: models/ml_filter.pkl
-    mode: bonus             # bonus | hardcut
-    bonus_threshold_1: 0.6
-    bonus_threshold_2: 0.75
-    cut_threshold: 0.45     # hardcut 모드 전용
 strategies:
   ema_cross:
     atr_period: 14
@@ -154,11 +142,8 @@ strategy_size_bonus_mult: 1.25
 tier_block_symbols:
   S:
   - ADAUSDT
-# BTC 숏 차단 — PF 2.51(포트폴리오 평균 3.49 미달) 저PF 버킷, 기회비용.
-# 연도별 검증: 2022/2024/2025-26 개선, 2023 중립. 단독 필터 중 유일하게 강건.
-symbol_block_directions:
-  BTCUSDT:
-  - short
+direction_size_mult:
+  long: 0.0
 symbols:
 - ETHUSDT
 - BTCUSDT

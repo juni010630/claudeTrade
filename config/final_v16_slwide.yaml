@@ -1,3 +1,8 @@
+# final_v16_slwide — v15 + multi_tf_breakout SL 1.8→2.1 ATR (ema는 1.8 유지)
+# 근거: 완전 데이터 재검증 — 브레이크아웃 진입이 완성 전 변동성에 털리는 문제를 넓은 SL이 해결
+# 검증: full $19.3M / Sharpe 3.049 / Calmar 26.7 / MDD -60.5% (v15: $10.6M/2.921/21.1/-65.8)
+#   연도별: 2022 $8,052(+40%) / 2023 $105(흑자 전환) / 2024 $1,444(-6%) / 2025-26 $18,712(+14%) — 3/4 개선
+#   이웃: multi SL 1.95~2.25 전 구간 baseline 상회 (plateau), ema SL 확대는 무효과
 backtest:
   end: '2026-04-14'
   initial_capital: 100
@@ -33,8 +38,8 @@ leverage_tiers:
     size_fraction: 0.3
   SSS:
     leverage: 50
+    risk_per_trade: 0.2
     size_fraction: 0.3
-    risk_per_trade: 0.20
 primary_timeframe: 1h
 regime:
   adx_period: 14
@@ -61,22 +66,22 @@ scorer:
   daily_ema_period: 200
   funding_long_max: 0.0003
   funding_short_min: -0.0003
+  ml_soft_scoring:
+    bonus_threshold_1: 0.6
+    bonus_threshold_2: 0.75
+    cut_threshold: 0.45
+    enabled: false
+    mode: bonus
+    model_path: models/ml_filter.pkl
   rsi_long_max: 70.0
   rsi_short_min: 40.0
   tier_a_min_score: 3
   tier_b_min_score: 99
   tier_c_min_score: 99
   tier_s_min_score: 4
-  tier_sss_min_score: 6
   tier_ss_min_score: 5
+  tier_sss_min_score: 6
   volume_ratio_threshold: 1.8
-  ml_soft_scoring:
-    enabled: false          # 검증 통과 후 true로 변경
-    model_path: models/ml_filter.pkl
-    mode: bonus             # bonus | hardcut
-    bonus_threshold_1: 0.6
-    bonus_threshold_2: 0.75
-    cut_threshold: 0.45     # hardcut 모드 전용
 strategies:
   ema_cross:
     atr_period: 14
@@ -93,7 +98,7 @@ strategies:
     slow_period: 21
   multi_tf_breakout:
     atr_period: 14
-    atr_sl_mult: 1.8
+    atr_sl_mult: 2.1
     atr_tp_mult: 4.0
     bb_period: 25
     bb_std_1h: 2.2
@@ -151,11 +156,6 @@ strategy_size_bonus:
   - 14
   - 22
 strategy_size_bonus_mult: 1.25
-tier_block_symbols:
-  S:
-  - ADAUSDT
-# BTC 숏 차단 — PF 2.51(포트폴리오 평균 3.49 미달) 저PF 버킷, 기회비용.
-# 연도별 검증: 2022/2024/2025-26 개선, 2023 중립. 단독 필터 중 유일하게 강건.
 symbol_block_directions:
   BTCUSDT:
   - short
@@ -166,6 +166,15 @@ symbols:
 - ARBUSDT
 - FILUSDT
 - ADAUSDT
+tier_block_symbols:
+  A:
+  - ADAUSDT
+  - ARBUSDT
+  - FILUSDT
+  S:
+  - ADAUSDT
+  - ARBUSDT
+  - FILUSDT
 timeframes:
 - 1h
 - 4h

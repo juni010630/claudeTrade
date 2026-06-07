@@ -32,10 +32,12 @@ class EMACrossStrategy(BaseStrategy):
         self.symbols: list[str] = cfg.get("symbols", ["BTCUSDT"])
         self.signal_tf: str = cfg.get("signal_tf", "1h")
         self.filter_tf: str = cfg.get("filter_tf", "1d")
+        # 다중 속도 변형용 — 이름을 config로 오버라이드 (기본은 기존과 동일)
+        self._name: str = cfg.get("strategy_name", "ema_cross")
 
     @property
     def name(self) -> str:
-        return "ema_cross"
+        return self._name
 
     def generate_signals(
         self, snapshot: MarketSnapshot, regime: RegimeState

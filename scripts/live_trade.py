@@ -42,6 +42,7 @@ from risk.guards import RiskGuards
 from risk.position_sizer import PositionSizer
 from signals.scorer import ConfluenceScorer
 from strategies.ema_cross import EMACrossStrategy
+from strategies.mean_reversion import MeanReversionStrategy
 from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
 
 # ── 로깅 ──────────────────────────────────────────────────────────
@@ -99,16 +100,45 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
 
     strategy_map = {
         "ema_cross":          EMACrossStrategy,
+        "ema_cross_slow":     EMACrossStrategy,   # 다중 속도 변형 (strategy_name으로 구분)
         "multi_tf_breakout":  MultiTFBreakoutStrategy,
+        "mean_reversion":     MeanReversionStrategy,
     }
     strategies = []
     for key, cls in strategy_map.items():
-        cfg = p.get("strategies", {}).get(key, {})
-        if cfg.get("enabled", True):
-            cfg["symbols"] = symbols
-            strategies.append(cls(cfg))
+        cfg = p.get("strategies", {}).get(key)
+        if cfg is None:
+            continue  # config 미정의 전략은 비활성 (run_backtest와 동일 규칙)
+        if not cfg.get("enabled", True):
+            continue
+        cfg["symbols"] = symbols
+        strategies.append(cls(cfg))
 
     cap = initial_capital if initial_capital is not None else p.get("backtest", {}).get("initial_capital", 10_000)
+
+    # 피라미딩 라이브: 진입 시 STOP_MARKET 증액 주문 등록 → 체결 시 엔진이
+    # 봉 high/low 트리거로 tracker 동기화 + TP/SL 총수량 재등록 (engine/backtest.py)
+    # ⚠️ testnet은 STOP_MARKET -4120 차단 → 증액 주문 등록 실패 로그 발생 (포지션은 정상)
+
+    # ML 소프트 스코링 (선택적) — run_backtest.py와 동일 로직
+    _ml_filter_live = None
+    _ml_cfg_live = sc.get("ml_soft_scoring", {})
+    _ml_mode_live = "bonus"
+    _ml_cut_live = 0.45
+    if _ml_cfg_live.get("enabled", False):
+        try:
+            from strategies.ml_filter import MLModels, MLSignalFilter
+            _models_live = MLModels.load(_ml_cfg_live.get("model_path", "models/ml_filter.pkl"))
+            _ml_mode_live = _ml_cfg_live.get("mode", "bonus")
+            _ml_cut_live = _ml_cfg_live.get("cut_threshold", 0.45)
+            _ml_filter_live = MLSignalFilter(
+                models=_models_live,
+                clf_threshold=_ml_cut_live if _ml_mode_live == "hardcut" else 0.0,
+            )
+        except Exception as _e:
+            import logging as _lg
+            _lg.getLogger(__name__).warning("ML 모델 로드 실패: %s — ML 비활성", _e)
+
     return BacktestEngine(
         initial_capital=cap,
         strategies=strategies,
@@ -136,6 +166,11 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
             tier_a_min_score=sc.get("tier_a_min_score", 3),
             tier_b_min_score=sc.get("tier_b_min_score", 2),
             tier_c_min_score=sc.get("tier_c_min_score", 1),
+            ml_filter=_ml_filter_live,
+            ml_bonus_threshold_1=_ml_cfg_live.get("bonus_threshold_1", 0.6),
+            ml_bonus_threshold_2=_ml_cfg_live.get("bonus_threshold_2", 0.75),
+            ml_mode=_ml_mode_live,
+            ml_cut_threshold=_ml_cut_live,
             rsi_neutral_penalty=tuple(sc["rsi_neutral_penalty"]) if sc.get("rsi_neutral_penalty") else None,
         ),
         risk_guards=RiskGuards(
@@ -172,10 +207,20 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         strategy_block_symbols=p.get("strategy_block_symbols"),
         tier_block_symbols=p.get("tier_block_symbols"),
         symbol_block_directions=p.get("symbol_block_directions"),
+        strategy_block_tiers=p.get("strategy_block_tiers"),
+        block_weekdays=p.get("block_weekdays"),
         direction_size_mult=p.get("direction_size_mult"),
         strategy_size_penalty=p.get("strategy_size_penalty"),
         strategy_size_bonus=p.get("strategy_size_bonus"),
         strategy_size_bonus_mult=p.get("strategy_size_bonus_mult", 1.5),
+        pyramid_trigger_r=(p.get("pyramid", {}).get("trigger_r")
+                           if p.get("pyramid", {}).get("enabled") else None),
+        pyramid_add_fraction=p.get("pyramid", {}).get("add_fraction", 0.5),
+        pyramid_max_adds=p.get("pyramid", {}).get("max_adds", 1),
+        pyramid_strategies=p.get("pyramid", {}).get("strategies"),
+        pyramid_min_score=p.get("pyramid", {}).get("min_score"),
+        equity_curve_trading=p.get("equity_curve_trading", 0),
+        adx_scaling=p.get("adx_scaling", False),
         notifier=notifier,
         trade_log_path="trades.csv",
     )
@@ -400,18 +445,45 @@ def main() -> None:
                         f"포지션: {state.open_position_count}개\n" + "\n".join(pos_lines)
                     )
 
-                # 잔고 대조 (10봉마다)
+                # 잔고 대조 (10봉마다) — 예측 장부 vs 실제 잔고 괴리 측정·원인분해·경보·안전동기화
                 if bar_count % 10 == 0:
                     try:
                         bal = exchange.fetch_balance()
                         real_usdt = float(bal.get("USDT", {}).get("total", 0) or 0)
-                        drift_pct = abs(real_usdt - state.equity) / state.equity * 100 if state.equity > 0 else 0
-                        logger.info("잔고 대조: 거래소=%.2f tracker=%.2f (괴리 %.1f%%)", real_usdt, state.equity, drift_pct)
-                        if drift_pct > 5:
-                            msg = f"⚠️ 잔고 괴리 {drift_pct:.1f}%\n거래소: {real_usdt:.2f}\ntracker: {state.equity:.2f}"
-                            logger.warning(msg)
-                            if notifier and notifier.enabled:
-                                notifier.notify_info(msg)
+                        expected = state.equity
+                        drift_abs = real_usdt - expected          # +면 예측 과소, -면 슬리피지 손실
+                        drift_pct = drift_abs / expected * 100 if expected > 0 else 0.0
+
+                        # 원인 분해 — ledger 누적 비용 (전부 실현치)
+                        trcs = engine.ledger.records
+                        cum_comm = sum(t.commission for t in trcs)
+                        cum_slip = sum(t.slippage_cost for t in trcs)
+                        cum_fund = sum(t.funding_paid for t in trcs)
+                        logger.info(
+                            "괴리: 실제=%.2f 예측=%.2f (%+.2f%%, %+.2f USDT) | "
+                            "누적 수수료 %.2f 슬리피지 %.2f 펀딩 %.2f",
+                            real_usdt, expected, drift_pct, drift_abs,
+                            cum_comm, cum_slip, cum_fund,
+                        )
+
+                        # 2단계 경보 (텔레그램): 경고 ±2% / 위험 ±5%
+                        if notifier and notifier.enabled and abs(drift_pct) >= 2:
+                            level = "🚨 위험" if abs(drift_pct) >= 5 else "⚠️ 경고"
+                            notifier.notify_info(
+                                f"{level} 잔고 괴리 {drift_pct:+.2f}% ({drift_abs:+.2f} USDT)\n"
+                                f"실제: ${real_usdt:,.2f} / 예측: ${expected:,.2f}\n"
+                                f"누적 수수료 ${cum_comm:,.2f} · 슬리피지 ${cum_slip:,.2f} · 펀딩 ${cum_fund:,.2f}"
+                            )
+
+                        # 안전 동기화 — 포지션 0일 때만 (unrealized 오염 방지)
+                        if state.open_position_count == 0 and abs(drift_pct) > 0.5 and real_usdt > 0:
+                            engine.tracker.state.cash = real_usdt
+                            engine.tracker.state.equity = real_usdt
+                            engine.tracker.state.daily_start_equity = real_usdt
+                            logger.info(
+                                "포지션 0 — tracker를 실제 잔고로 동기화: %.2f → %.2f (델타 %+.2f 기록됨)",
+                                expected, real_usdt, drift_abs,
+                            )
                     except Exception as e:
                         logger.warning("잔고 대조 실패: %s", e)
 

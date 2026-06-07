@@ -38,9 +38,13 @@ class ConfluenceScorer:
         tier_a_min_score: int = 3,
         tier_b_min_score: int = 2,
         tier_c_min_score: int = 1,    # 최소 신호 탐색
+        regime_strong_adx: float | None = None,    # ADX >= 이 값 → +2 (None=비활성)
+        regime_high_adx_cutoff: float | None = None,  # ADX >= 이 값 → +0 (너무 강한 추세 차단)
         ml_filter: "MLSignalFilter | None" = None,
         ml_bonus_threshold_1: float = 0.6,   # clf_prob >= 0.6 → +1점
         ml_bonus_threshold_2: float = 0.75,  # clf_prob >= 0.75 → +2점
+        ml_mode: str = "bonus",              # "bonus" | "hardcut"
+        ml_cut_threshold: float = 0.45,      # hardcut 모드 전용 — clf_prob < 이 값이면 NO_TRADE
         rsi_neutral_penalty: tuple[float, float] | None = None,  # (lo, hi) → RSI가 이 범위면 -1점
     ) -> None:
         self.volume_ratio_threshold = volume_ratio_threshold
@@ -55,9 +59,13 @@ class ConfluenceScorer:
         self.tier_a_min_score  = tier_a_min_score
         self.tier_b_min_score  = tier_b_min_score
         self.tier_c_min_score  = tier_c_min_score
+        self._regime_strong_adx = regime_strong_adx
+        self._regime_high_adx_cutoff = regime_high_adx_cutoff
         self._ml_filter = ml_filter
         self._ml_bonus_t1 = ml_bonus_threshold_1
         self._ml_bonus_t2 = ml_bonus_threshold_2
+        self._ml_mode = ml_mode
+        self._ml_cut_threshold = ml_cut_threshold
         self._rsi_neutral_penalty = rsi_neutral_penalty
 
     def _map_tier(self, total: int) -> LeverageTier:
@@ -85,8 +93,16 @@ class ConfluenceScorer:
         sym = signal.symbol
         direction = signal.direction
 
-        # 1. 국면 강도 (ADX > 25 이면 +1)
-        pts["regime_strength"] = 1 if regime.adx > 25 else 0
+        # 1. 국면 강도
+        adx_val = regime.adx
+        if self._regime_high_adx_cutoff is not None and adx_val >= self._regime_high_adx_cutoff:
+            pts["regime_strength"] = 0   # 과열 추세 차단
+        elif self._regime_strong_adx is not None and adx_val >= self._regime_strong_adx:
+            pts["regime_strength"] = 2   # 강한 추세 보너스
+        elif adx_val > 25:
+            pts["regime_strength"] = 1
+        else:
+            pts["regime_strength"] = 0
 
         # 2. 거래량 확인
         bars_1h = snapshot.bars.get(sym, {}).get("1h", pd.DataFrame())
@@ -148,25 +164,34 @@ class ConfluenceScorer:
         else:
             pts["tf_4h"] = 0
 
-        # 8. ML 보너스 (선택적 — ml_filter 설정 시만)
+        # 8. ML (선택적 — ml_filter 설정 시만)
         ml_bonus = 0
+        ml_cut = False
         if self._ml_filter is not None:
             try:
                 from strategies.ml_filter import compute_features
-                bars_1h = snapshot.bars.get(sym, {}).get("1h", pd.DataFrame())
-                bars_4h = snapshot.bars.get(sym, {}).get("4h", pd.DataFrame())
-                bars_1d = snapshot.bars.get(sym, {}).get("1d", pd.DataFrame())
-                if not bars_1h.empty and len(bars_1h) > 200:
-                    feat = compute_features(bars_1h, bars_4h, bars_1d, len(bars_1h) - 1)
+                _bars_1h = snapshot.bars.get(sym, {}).get("1h", pd.DataFrame())
+                _bars_4h = snapshot.bars.get(sym, {}).get("4h", pd.DataFrame())
+                _bars_1d = snapshot.bars.get(sym, {}).get("1d", pd.DataFrame())
+                if not _bars_1h.empty and len(_bars_1h) > 200:
+                    feat = compute_features(_bars_1h, _bars_4h, _bars_1d, len(_bars_1h) - 1)
                     if feat is not None:
+                        # 컨텍스트 피처 추가
+                        feat["direction_long"] = 1 if direction == "long" else 0
+                        feat["strategy_ema"] = 1 if signal.strategy == "ema_cross" else 0
+                        feat["funding"] = snapshot.funding_rates.get(sym, 0.0)
                         pred = self._ml_filter.predict(feat)
                         clf_prob = pred["clf_prob"]
-                        if clf_prob >= self._ml_bonus_t2:
-                            ml_bonus = 2
-                        elif clf_prob >= self._ml_bonus_t1:
-                            ml_bonus = 1
+                        if self._ml_mode == "hardcut":
+                            if clf_prob < self._ml_cut_threshold:
+                                ml_cut = True
+                        else:  # bonus
+                            if clf_prob >= self._ml_bonus_t2:
+                                ml_bonus = 2
+                            elif clf_prob >= self._ml_bonus_t1:
+                                ml_bonus = 1
             except Exception:
-                pass  # ML 실패 시 보너스 0으로 진행
+                pass  # ML 실패 시 보너스 0 / 컷 없이 진행
         pts["ml_bonus"] = ml_bonus
 
         # 9. RSI 중립 구간 페널티 (선택적)
@@ -179,4 +204,6 @@ class ConfluenceScorer:
 
         total = sum(pts.values())
         signal.raw_points = pts
+        if ml_cut:
+            return SignalScore(total=total, tier=LeverageTier.NO_TRADE, signal=signal)
         return SignalScore(total=total, tier=self._map_tier(total), signal=signal)

@@ -27,6 +27,10 @@ class Position:
     entry_slippage: float = 0.0
     # 진입 시 confluence score (ledger 기록용)
     confluence_score: int = 0
+    # 피라미딩 증액 횟수
+    adds_done: int = 0
+    # 진입 의도가 (order.price) — 실제 체결가(entry_price) 대비 슬리피지 측정용
+    order_price: float = 0.0
 
 
 @dataclass

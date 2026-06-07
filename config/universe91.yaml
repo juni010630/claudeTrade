@@ -1,3 +1,4 @@
+# universe91 — v14 로직 그대로, 2022년 이전 상장 USDT 무기한 전체(+현행 6) = 92심볼
 backtest:
   end: '2026-04-14'
   initial_capital: 100
@@ -33,9 +34,16 @@ leverage_tiers:
     size_fraction: 0.3
   SSS:
     leverage: 50
+    risk_per_trade: 0.2
     size_fraction: 0.3
-    risk_per_trade: 0.20
 primary_timeframe: 1h
+pyramid:
+  add_fraction: 0.25
+  enabled: true
+  max_adds: 1
+  strategies:
+  - ema_cross
+  trigger_r: 1.0
 regime:
   adx_period: 14
   adx_ranging_threshold: 12.0
@@ -61,22 +69,22 @@ scorer:
   daily_ema_period: 200
   funding_long_max: 0.0003
   funding_short_min: -0.0003
+  ml_soft_scoring:
+    bonus_threshold_1: 0.6
+    bonus_threshold_2: 0.75
+    cut_threshold: 0.45
+    enabled: false
+    mode: bonus
+    model_path: models/ml_filter.pkl
   rsi_long_max: 70.0
   rsi_short_min: 40.0
   tier_a_min_score: 3
   tier_b_min_score: 99
   tier_c_min_score: 99
   tier_s_min_score: 4
-  tier_sss_min_score: 6
   tier_ss_min_score: 5
+  tier_sss_min_score: 6
   volume_ratio_threshold: 1.8
-  ml_soft_scoring:
-    enabled: false          # 검증 통과 후 true로 변경
-    model_path: models/ml_filter.pkl
-    mode: bonus             # bonus | hardcut
-    bonus_threshold_1: 0.6
-    bonus_threshold_2: 0.75
-    cut_threshold: 0.45     # hardcut 모드 전용
 strategies:
   ema_cross:
     atr_period: 14
@@ -151,11 +159,6 @@ strategy_size_bonus:
   - 14
   - 22
 strategy_size_bonus_mult: 1.25
-tier_block_symbols:
-  S:
-  - ADAUSDT
-# BTC 숏 차단 — PF 2.51(포트폴리오 평균 3.49 미달) 저PF 버킷, 기회비용.
-# 연도별 검증: 2022/2024/2025-26 개선, 2023 중립. 단독 필터 중 유일하게 강건.
 symbol_block_directions:
   BTCUSDT:
   - short
@@ -166,6 +169,95 @@ symbols:
 - ARBUSDT
 - FILUSDT
 - ADAUSDT
+- BCHUSDT
+- XRPUSDT
+- LTCUSDT
+- TRXUSDT
+- ETCUSDT
+- LINKUSDT
+- XLMUSDT
+- XMRUSDT
+- DASHUSDT
+- ZECUSDT
+- XTZUSDT
+- ATOMUSDT
+- BNBUSDT
+- ONTUSDT
+- IOTAUSDT
+- BATUSDT
+- VETUSDT
+- NEOUSDT
+- QTUMUSDT
+- IOSTUSDT
+- THETAUSDT
+- ALGOUSDT
+- ZILUSDT
+- KNCUSDT
+- ZRXUSDT
+- COMPUSDT
+- KAVAUSDT
+- BANDUSDT
+- RLCUSDT
+- SNXUSDT
+- DOTUSDT
+- SKLUSDT
+- YFIUSDT
+- CRVUSDT
+- TRBUSDT
+- SUSHIUSDT
+- RUNEUSDT
+- EGLDUSDT
+- SOLUSDT
+- ICXUSDT
+- STORJUSDT
+- UNIUSDT
+- AVAXUSDT
+- ENJUSDT
+- KSMUSDT
+- NEARUSDT
+- AAVEUSDT
+- RSRUSDT
+- BELUSDT
+- AXSUSDT
+- ZENUSDT
+- GRTUSDT
+- 1INCHUSDT
+- SANDUSDT
+- CHZUSDT
+- ANKRUSDT
+- RVNUSDT
+- SFPUSDT
+- COTIUSDT
+- CHRUSDT
+- MANAUSDT
+- ALICEUSDT
+- GTCUSDT
+- HBARUSDT
+- ONEUSDT
+- CELRUSDT
+- HOTUSDT
+- MTLUSDT
+- OGNUSDT
+- 1000SHIBUSDT
+- BTCDOMUSDT
+- MASKUSDT
+- ICPUSDT
+- IOTXUSDT
+- C98USDT
+- DYDXUSDT
+- 1000XECUSDT
+- GALAUSDT
+- CELOUSDT
+- ARUSDT
+- ARPAUSDT
+- CTSIUSDT
+- LPTUSDT
+- ENSUSDT
+- PEOPLEUSDT
+- ROSEUSDT
+tier_block_symbols:
+  S:
+  - ADAUSDT
 timeframes:
 - 1h
 - 4h
