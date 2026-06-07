@@ -166,6 +166,8 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
             tier_a_min_score=sc.get("tier_a_min_score", 3),
             tier_b_min_score=sc.get("tier_b_min_score", 2),
             tier_c_min_score=sc.get("tier_c_min_score", 1),
+            regime_strong_adx=sc.get("regime_strong_adx"),
+            regime_high_adx_cutoff=sc.get("regime_high_adx_cutoff"),
             ml_filter=_ml_filter_live,
             ml_bonus_threshold_1=_ml_cfg_live.get("bonus_threshold_1", 0.6),
             ml_bonus_threshold_2=_ml_cfg_live.get("bonus_threshold_2", 0.75),
@@ -476,10 +478,11 @@ def main() -> None:
                             )
 
                         # 안전 동기화 — 포지션 0일 때만 (unrealized 오염 방지)
+                        # daily_start_equity는 건드리지 않음 — 덮어쓰면 그날 누적 손실이
+                        # 0으로 리셋돼 일일 DD 가드(-4%/-10%)가 느슨해짐. 자정 reset_daily가 관리.
                         if state.open_position_count == 0 and abs(drift_pct) > 0.5 and real_usdt > 0:
                             engine.tracker.state.cash = real_usdt
                             engine.tracker.state.equity = real_usdt
-                            engine.tracker.state.daily_start_equity = real_usdt
                             logger.info(
                                 "포지션 0 — tracker를 실제 잔고로 동기화: %.2f → %.2f (델타 %+.2f 기록됨)",
                                 expected, real_usdt, drift_abs,
