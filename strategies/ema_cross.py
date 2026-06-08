@@ -32,6 +32,10 @@ class EMACrossStrategy(BaseStrategy):
         self.symbols: list[str] = cfg.get("symbols", ["BTCUSDT"])
         self.signal_tf: str = cfg.get("signal_tf", "1h")
         self.filter_tf: str = cfg.get("filter_tf", "1d")
+        # 거래량 상태 필터: 진입봉 volume/SMA(N) < 임계면 진입 차단 (저유동=노이즈, B1 검증).
+        # None(기본)=비활성 → 기존 동작 보존. look-ahead 없음(진입봉까지 데이터).
+        self.min_volume_ratio: float | None = cfg.get("min_volume_ratio", None)
+        self.volume_ma_period: int = cfg.get("volume_ma_period", 20)
         # 다중 속도 변형용 — 이름을 config로 오버라이드 (기본은 기존과 동일)
         self._name: str = cfg.get("strategy_name", "ema_cross")
 
@@ -56,6 +60,14 @@ class EMACrossStrategy(BaseStrategy):
                 continue
             if len(df_filter) < self.daily_ema_period + 1:
                 continue
+
+            # 거래량 상태 필터 (B1): 진입봉 거래량이 SMA 대비 임계 미만이면 스킵
+            if self.min_volume_ratio is not None and "volume" in df_signal:
+                vma = df_signal["volume"].rolling(self.volume_ma_period).mean().iloc[-1]
+                if vma > 0:
+                    vratio = float(df_signal["volume"].iloc[-1]) / float(vma)
+                    if vratio < self.min_volume_ratio:
+                        continue
 
             # 1D EMA 방향 필터
             daily_ema = calc_ema(df_filter, self.daily_ema_period)

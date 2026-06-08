@@ -9,6 +9,7 @@ from data.schemas import MarketSnapshot
 from execution.broker import BacktestBroker
 from execution.funding import FundingRateSimulator
 from execution.models import Order, OrderSide, OrderType
+from indicators.momentum import rsi as calc_rsi
 from metrics.report import MetricsReport
 from portfolio.equity_curve import EquityCurve
 from portfolio.ledger import Ledger
@@ -51,6 +52,8 @@ class BacktestEngine:
         circuit_breaker: CircuitBreaker | None = None,
         correlation_filter: CorrelationFilter | None = None,
         position_sizer: PositionSizer | None = None,
+        strategy_leverage_tiers: dict[str, dict] | None = None,  # 전략별 레버리지 티어 오버라이드
+        strategy_capital_fraction: dict[str, float] | None = None,  # 전략별 사이징 기준자본 비율(단일계좌 분할)
         broker: BacktestBroker | None = None,
         funding_simulator: FundingRateSimulator | None = None,
         price_tf: str = "1h",           # MTM/TP-SL 가격 참조 타임프레임
@@ -86,6 +89,16 @@ class BacktestEngine:
         pyramid_max_adds: int = 1,               # 최대 증액 횟수
         pyramid_strategies: list[str] | None = None,  # 증액 허용 전략 (None=전체)
         pyramid_min_score: int | None = None,         # 증액 최소 confluence score (None=전체)
+        rsi_momentum_gate: float | None = None,       # 방향RSI < 이 값이면 진입 차단 (None=비활성)
+        rsi_momentum_weight: dict | None = None,      # {low_thr,low_mult,high_thr,high_mult} 강도별 사이징
+        rsi_momentum_period: int = 14,                # RSI 모멘텀 게이트/가중용 RSI period
+        vol_target_ann: float | None = None,          # 변동성 타게팅 목표 연환산변동성(예0.6). None=비활성
+        vol_scale_min: float = 0.3,                   # 사이징 스케일 하한
+        vol_scale_max: float = 2.0,                   # 사이징 스케일 상한
+        vol_lookback: int = 30,                       # 실현변동성 계산 1d 봉수
+        btc_mom_gate: bool = False,                    # True → BTC 20일모멘텀 역행 진입 차단
+        btc_mom_opposite_weight: float | None = None, # 역행 진입 사이징 배율 (None=비활성)
+        btc_mom_lookback: int = 20,                   # BTC 모멘텀 1d 봉수
         notifier=None,
         trade_log_path: str | None = None,  # CSV 거래 로그 경로 (라이브용)
     ) -> None:
@@ -96,6 +109,17 @@ class BacktestEngine:
         self.circuit_breaker = circuit_breaker or CircuitBreaker()
         self.corr_filter = correlation_filter or CorrelationFilter()
         self.sizer = position_sizer or PositionSizer()
+        # 전략별 사이저 오버라이드 (단일계좌에 추세+평균회귀 공존용).
+        # 글로벌 사이저의 risk 파라미터는 공유, tier_config만 전략별로 교체.
+        self._strategy_sizers: dict[str, PositionSizer] = {}
+        for _name, _tiers in (strategy_leverage_tiers or {}).items():
+            self._strategy_sizers[_name] = PositionSizer(
+                risk_per_trade=self.sizer.risk_per_trade,
+                tier_config=_tiers,
+                max_notional_equity_mult=self.sizer.max_notional_equity_mult,
+                max_notional_usd=self.sizer.max_notional_usd,
+            )
+        self._strategy_capital_fraction: dict[str, float] = strategy_capital_fraction or {}
         self.broker = broker or BacktestBroker()
         self.funding_sim = funding_simulator or FundingRateSimulator()
         self._commission = self.broker.commission
@@ -149,6 +173,16 @@ class BacktestEngine:
         self._pyramid_max_adds = pyramid_max_adds
         self._pyramid_strategies = set(pyramid_strategies) if pyramid_strategies else None
         self._pyramid_min_score = pyramid_min_score
+        self._rsi_mom_gate = rsi_momentum_gate
+        self._rsi_mom_weight = rsi_momentum_weight
+        self._rsi_mom_period = rsi_momentum_period
+        self._vol_target = vol_target_ann
+        self._vol_scale_min = vol_scale_min
+        self._vol_scale_max = vol_scale_max
+        self._vol_lookback = vol_lookback
+        self._btc_mom_gate = btc_mom_gate
+        self._btc_mom_opp_w = btc_mom_opposite_weight
+        self._btc_mom_lookback = btc_mom_lookback
         self._equity_history: list[float] = []
 
         # 시그널 덤프/리플레이 모드
@@ -508,12 +542,59 @@ class BacktestEngine:
             if self.corr_filter.is_blocked(_cand_proxy(cand), state):
                 continue
 
+            # RSI 모멘텀 (진입방향 기준): 게이트 차단 + 가중 사이징용 dir_rsi
+            # long이면 RSI 그대로, short이면 100-RSI (높을수록 "내 방향으로 강모멘텀")
+            dir_rsi = None
+            if self._rsi_mom_gate is not None or self._rsi_mom_weight is not None:
+                _h1 = snapshot.bars.get(cand["symbol"], {}).get("1h")
+                if _h1 is not None and len(_h1) > self._rsi_mom_period + 5:
+                    _rv = float(calc_rsi(_h1, self._rsi_mom_period).iloc[-1])
+                    dir_rsi = _rv if cand["direction"] == "long" else 100.0 - _rv
+                if self._rsi_mom_gate is not None and dir_rsi is not None and dir_rsi < self._rsi_mom_gate:
+                    continue  # 약모멘텀 진입 차단
+
+            # BTC 거시 모멘텀 역행 필터 (BTC 하락중 알트롱 = PF 0.43 독성 셀)
+            btc_opposed = False
+            if self._btc_mom_gate or self._btc_mom_opp_w is not None:
+                _btc = snapshot.bars.get("BTCUSDT", {}).get("1d")
+                if _btc is not None and len(_btc) > self._btc_mom_lookback + 1:
+                    _bm = _btc["close"].iloc[-1] / _btc["close"].iloc[-(self._btc_mom_lookback+1)] - 1
+                    # 비대칭: BTC 하락 중 알트 롱만 독성(PF0.43). 숏은 BTC방향 무관하게 양호.
+                    btc_opposed = (cand["direction"] == "long" and _bm < 0)
+                if self._btc_mom_gate and btc_opposed:
+                    continue  # BTC 모멘텀 역행 진입 차단
+
             tier = LeverageTier(cand["tier"])
-            size_usd, leverage = self.sizer.calculate(
-                tier, state.equity, cand["entry_price"], cand["sl_price"]
+            # 전략별 사이저/기준자본 (단일계좌 분할). 오버라이드 없으면 글로벌 사이저·전액.
+            _sizer = self._strategy_sizers.get(cand["strategy"], self.sizer)
+            _cap_base = state.equity * self._strategy_capital_fraction.get(cand["strategy"], 1.0)
+            size_usd, leverage = _sizer.calculate(
+                tier, _cap_base, cand["entry_price"], cand["sl_price"]
             )
             if size_usd <= 0:
                 continue
+
+            # BTC 모멘텀 역행 사이징 축소 (차단 대신 가중)
+            if self._btc_mom_opp_w is not None and btc_opposed:
+                size_usd *= self._btc_mom_opp_w
+
+            # 변동성 타게팅: 심볼 실현변동성 기준 size 스케일 (고변동 축소/저변동 확대)
+            if self._vol_target is not None:
+                _d1 = snapshot.bars.get(cand["symbol"], {}).get("1d")
+                if _d1 is not None and len(_d1) > self._vol_lookback + 1:
+                    _ret = _d1["close"].pct_change().iloc[-self._vol_lookback:]
+                    _cv = float(_ret.std()) * (365 ** 0.5)
+                    if _cv > 0:
+                        _scale = max(self._vol_scale_min, min(self._vol_scale_max, self._vol_target / _cv))
+                        size_usd *= _scale
+
+            # RSI 모멘텀 가중: 강도별 사이징 (약모멘텀 축소 / 강모멘텀 확대)
+            if self._rsi_mom_weight is not None and dir_rsi is not None:
+                _w = self._rsi_mom_weight
+                if dir_rsi < _w.get("low_thr", 60):
+                    size_usd *= _w.get("low_mult", 1.0)
+                elif dir_rsi >= _w.get("high_thr", 70):
+                    size_usd *= _w.get("high_mult", 1.0)
 
             # 불리 시간대 페널티: 해당 시간대이면 사이즈 50% 축소
             penalty_hours = self._strategy_size_penalty.get(cand["strategy"])

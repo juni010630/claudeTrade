@@ -26,19 +26,12 @@ def sweep_configs() -> dict[str, dict]:
     """name -> {점표기 키: 값} 오버라이드."""
     return {
         "baseline":   {},
-        # R4: 전략 파라미터 이웃 (ema 8/21, multi bb 25/2.2, vol 1.8x, rsi 55/45)
-        "ema_6_18":   {"strategies.ema_cross.fast_period": 6,
-                       "strategies.ema_cross.slow_period": 18},
-        "ema_10_26":  {"strategies.ema_cross.fast_period": 10,
-                       "strategies.ema_cross.slow_period": 26},
-        "mul_bb20":   {"strategies.multi_tf_breakout.bb_std_1h": 2.0},
-        "mul_bb24":   {"strategies.multi_tf_breakout.bb_std_1h": 2.4},
-        "mul_vol15":  {"strategies.multi_tf_breakout.volume_multiplier": 1.5},
-        "mul_vol21":  {"strategies.multi_tf_breakout.volume_multiplier": 2.1},
-        "mul_rsi5050": {"strategies.multi_tf_breakout.rsi_long_min": 50.0,
-                        "strategies.multi_tf_breakout.rsi_short_max": 50.0},
-        "mul_rsi6040": {"strategies.multi_tf_breakout.rsi_long_min": 60.0,
-                        "strategies.multi_tf_breakout.rsi_short_max": 40.0},
+        # BTC 거시 모멘텀 역행 필터 (BTC하락+알트롱 = PF0.43 독성셀)
+        "btc_gate":   {"btc_regime.mom_gate": True},               # 역행 진입 차단
+        "btc_w0":     {"btc_regime.mom_opposite_weight": 0.0},     # 역행 사이징 0 (=차단과 유사하나 슬롯유지)
+        "btc_w25":    {"btc_regime.mom_opposite_weight": 0.25},    # 역행 1/4
+        "btc_w50":    {"btc_regime.mom_opposite_weight": 0.5},     # 역행 절반
+        "btc_lb10_w25": {"btc_regime.mom_lookback": 10, "btc_regime.mom_opposite_weight": 0.25},
     }
 
 

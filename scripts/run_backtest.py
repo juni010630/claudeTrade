@@ -59,7 +59,7 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
             continue  # config에 미정의 전략은 건너뜀
         if not cfg.get("enabled", True):
             continue
-        cfg["symbols"] = symbols
+        cfg.setdefault("symbols", symbols)  # config에 전략별 symbols 있으면 존중(심볼별 전략 배정)
         strategies.append(cls(cfg))
 
     if not strategies:
@@ -165,10 +165,13 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
             max_notional_usd=r.get("max_notional_usd"),
             max_notional_equity_mult=r.get("max_notional_equity_mult", 3.0),
         ),
+        strategy_leverage_tiers=p.get("strategy_leverage_tiers"),
+        strategy_capital_fraction=p.get("strategy_capital_fraction"),
         broker=broker,
         funding_simulator=FundingRateSimulator(
             interval_hours=e.get("funding_interval_hours", 8),
         ),
+        price_tf=p.get("primary_timeframe", "1h"),  # 1d 슬리브용 — 기본 1h(v16 무영향)
         max_hold_hours=p.get("engine", {}).get("max_hold_hours"),
         breakeven_trigger_r=p.get("engine", {}).get("breakeven_trigger_r"),
         trailing_r_mult=p.get("engine", {}).get("trailing_r_mult"),
@@ -191,6 +194,16 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         pyramid_max_adds=p.get("pyramid", {}).get("max_adds", 1),
         pyramid_strategies=p.get("pyramid", {}).get("strategies"),
         pyramid_min_score=p.get("pyramid", {}).get("min_score"),
+        rsi_momentum_gate=engine_kwargs.pop("rsi_momentum_gate", p.get("rsi_momentum", {}).get("gate")),
+        rsi_momentum_weight=engine_kwargs.pop("rsi_momentum_weight", p.get("rsi_momentum", {}).get("weight")),
+        rsi_momentum_period=p.get("rsi_momentum", {}).get("period", 14),
+        vol_target_ann=engine_kwargs.pop("vol_target_ann", p.get("vol_target", {}).get("target_ann")),
+        vol_scale_min=p.get("vol_target", {}).get("scale_min", 0.3),
+        vol_scale_max=p.get("vol_target", {}).get("scale_max", 2.0),
+        vol_lookback=p.get("vol_target", {}).get("lookback", 30),
+        btc_mom_gate=engine_kwargs.pop("btc_mom_gate", p.get("btc_regime", {}).get("mom_gate", False)),
+        btc_mom_opposite_weight=engine_kwargs.pop("btc_mom_opposite_weight", p.get("btc_regime", {}).get("mom_opposite_weight")),
+        btc_mom_lookback=p.get("btc_regime", {}).get("mom_lookback", 20),
         equity_curve_trading=engine_kwargs.pop("equity_curve_trading",
                                                p.get("equity_curve_trading", 0)),
         adx_scaling=engine_kwargs.pop("adx_scaling", p.get("adx_scaling", False)),

@@ -1,0 +1,48 @@
+{
+  "_note": "확정/검증된 전략 백테 성과 레지스트리. 기간 2022-01-01~2026-04-23, $100 시작, 봉기준(엔진 equity_curve). 비교 시 재백테 대신 이 값 사용. ⚠️ v16 헤드라인($19.3M/Sh3.05)은 시간대차단 26개 과적합 산물로 폐기됨 — project_v16_overfit_audit 참조.",
+  "strategies": {
+    "merged_v16_sleeve_5050": {
+      "config": "config/merged_v16_sleeve.yaml",
+      "status": "adopted_backtest_pending_live",
+      "desc": "단일계좌 병합: v16(funding3)+슬리브 평균회귀, per-strategy 레버(슬리브 flat lev3)+capital_fraction 0.5/0.5, daily DD stop off. 2026-06-09 채택(5:5).",
+      "period": "2022-01-01~2026-04-23",
+      "final_usd_from_100": 4442,
+      "total_return_pct": 4342,
+      "sharpe_daily": 1.64,
+      "sharpe_bar": 1.69,
+      "mdd_daily_pct": -45.0,
+      "mdd_bar_pct": -49.7,
+      "profit_factor": 1.51,
+      "trades": 833,
+      "win_rate_pct": 47.9,
+      "notes": "MDD 주범은 v16(분해: v16-only 절반 -53.6%, 슬리브 무상관 +8pp 완충). 슬리브는 1h마찰로 수익기여 거의0, 가치는 MDD완충. 프론티어 40:60=Sh1.68/MDD-37, 60:40=-55, 70:30=-64, 80:20=-73. 추세 on/off 스위치는 과적합 기각.",
+      "quarterly_csv": "data/results/merged_quarterly.csv"
+    },
+    "v16_slwide_funding3": {
+      "config": "config/final_v16_slwide.yaml",
+      "status": "honest_standalone",
+      "desc": "v16 + funding3 차단(26시간 과적합 제거→펀딩정산 3시간). 단독(슬리브 없음).",
+      "period": "2022-01-01~2026-04-23",
+      "final_usd_from_100": 27157,
+      "total_return_pct": 27057,
+      "sharpe_bar": 1.67,
+      "mdd_bar_pct": -89.0,
+      "profit_factor": 1.98,
+      "trades": 482,
+      "win_rate_pct": 44.6,
+      "notes": "정직한 v16(과적합 제거). 단독 MDD -89% — 슬리브 분산 없이는 대출시드 부적합."
+    },
+    "sleeve_meanrev": {
+      "config": "config/sleeve_meanrev.yaml",
+      "status": "component",
+      "desc": "RSI 평균회귀 슬리브 5심볼(LTC/UNI/STORJ/ARPA/BAND) lev3 sf0.08, 1d. 병합의 분산 컴포넌트.",
+      "period": "2022-01-01~2026-04-23",
+      "final_usd_from_100": 199,
+      "sharpe": 3.167,
+      "mdd_daily_pct": -48.3,
+      "profit_factor": 1.12,
+      "trades": 313,
+      "notes": "단독 수익 작지만 v16과 무상관(-0.06)이 가치. 추세 on/off 스위치 구조적 기각."
+    }
+  }
+}

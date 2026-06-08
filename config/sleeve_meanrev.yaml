@@ -1,8 +1,4 @@
-# final_v16_slwide — v15 + multi_tf_breakout SL 1.8→2.1 ATR (ema는 1.8 유지)
-# 근거: 완전 데이터 재검증 — 브레이크아웃 진입이 완성 전 변동성에 털리는 문제를 넓은 SL이 해결
-# 검증: full $19.3M / Sharpe 3.049 / Calmar 26.7 / MDD -60.5% (v15: $10.6M/2.921/21.1/-65.8)
-#   연도별: 2022 $8,052(+40%) / 2023 $105(흑자 전환) / 2024 $1,444(-6%) / 2025-26 $18,712(+14%) — 3/4 개선
-#   이웃: multi SL 1.95~2.25 전 구간 baseline 상회 (plateau), ema SL 확대는 무효과
+# sleeve_meanrev — 1d RSI 평균회귀 (LTC/UNI/STORJ/ARPA/BAND), lev3 sf0.08(익스포저0.24), 4년양수
 backtest:
   end: '2026-04-14'
   initial_capital: 100
@@ -14,6 +10,7 @@ data:
 engine:
   breakeven_trigger_r: null
   max_hold_hours: 336
+  subbar_tpsl: false
   trailing_r_mult: null
 execution:
   commission_maker: 0.0002
@@ -22,25 +19,25 @@ execution:
   funding_interval_hours: 8
 leverage_tiers:
   A:
-    leverage: 10
-    size_fraction: 0.1
+    leverage: 3
+    size_fraction: 0.08
   B:
-    leverage: 1
-    size_fraction: 0.01
+    leverage: 3
+    size_fraction: 0.08
   C:
-    leverage: 1
-    size_fraction: 0.01
+    leverage: 3
+    size_fraction: 0.08
   S:
-    leverage: 25
-    size_fraction: 0.22
+    leverage: 3
+    size_fraction: 0.08
   SS:
-    leverage: 40
-    size_fraction: 0.3
+    leverage: 3
+    size_fraction: 0.08
   SSS:
-    leverage: 50
+    leverage: 3
     risk_per_trade: 0.2
-    size_fraction: 0.3
-primary_timeframe: 1h
+    size_fraction: 0.08
+primary_timeframe: 1d
 regime:
   adx_period: 14
   adx_ranging_threshold: 12.0
@@ -49,7 +46,7 @@ regime:
   bb_std: 2.0
   bb_width_lookback: 50
   bb_width_squeeze_pct: 0.2
-  primary_tf: 1h
+  primary_tf: 1d
 risk:
   circuit_breaker_pause_hours: 48
   circuit_breaker_pause_losses: 5
@@ -58,7 +55,7 @@ risk:
   correlation_lookback: 100
   daily_drawdown_pause: -0.04
   daily_drawdown_stop: -0.1
-  max_positions: 7
+  max_positions: 5
   max_same_direction: 5
   risk_per_trade: 0.099
   tp_cooldown_hours: 6.0
@@ -73,7 +70,10 @@ scorer:
     enabled: false
     mode: bonus
     model_path: models/ml_filter.pkl
+  regime_high_adx_cutoff: null
+  regime_strong_adx: null
   rsi_long_max: 70.0
+  rsi_neutral_penalty: null
   rsi_short_min: 40.0
   tier_a_min_score: 3
   tier_b_min_score: 99
@@ -88,7 +88,7 @@ strategies:
     atr_sl_mult: 1.8
     atr_tp_mult: 3.5
     daily_ema_period: 150
-    enabled: true
+    enabled: false
     fast_period: 8
     filter_tf: 4h
     macd_fast: 12
@@ -96,6 +96,24 @@ strategies:
     macd_slow: 21
     signal_tf: 1h
     slow_period: 21
+  mean_reversion:
+    atr_period: 14
+    atr_sl_mult: 2.0
+    atr_tp_mult: 3.0
+    enabled: true
+    max_adx: 99.0
+    require_bb: false
+    rsi_overbought: 70.0
+    rsi_oversold: 30.0
+    rsi_period: 14
+    signal_tf: 1d
+    symbols: &id001
+    - LTCUSDT
+    - UNIUSDT
+    - STORJUSDT
+    - ARPAUSDT
+    - BANDUSDT
+    use_regime_gate: false
   multi_tf_breakout:
     atr_period: 14
     atr_sl_mult: 2.1
@@ -105,7 +123,7 @@ strategies:
     bb_std_4h: 2.0
     confirm_tf: 4h
     daily_ema_period: 150
-    enabled: true
+    enabled: false
     filter_tf: 1d
     rsi_long_min: 55.0
     rsi_period: 10
@@ -113,20 +131,35 @@ strategies:
     signal_tf: 1h
     volume_lookback: 20
     volume_multiplier: 1.8
-# strategy_block_hours: 데이터마이닝 26시간 → 인과 3시간(펀딩정산)으로 교체 (2026-06-08).
-#   기존 26시간은 과적합(1h시프트 붕괴/per-hour corr~0/OOS 일반화 +0.3 Sharpe뿐).
-#   funding3 {0,8,16}=바이낸스 펀딩정산 UTC → 정산 휩쏘 회피. 인과+양쪽반쪽 robust.
-#   효과(블렌드): Sharpe 1.66→1.71, MDD -56→-49%, 2023 횡보 +10→+39%. (A4 검증)
-#   ⚠️ 단독 MDD 여전히 -89% — A1(rpt 축소)+A3(슬리브 50:50)와 묶어 배포할 것.
 strategy_block_hours:
   ema_cross:
-  - 0
+  - 6
+  - 7
   - 8
+  - 9
+  - 10
+  - 11
+  - 13
+  - 14
   - 16
+  - 18
+  - 19
+  - 21
+  - 23
   multi_tf_breakout:
-  - 0
+  - 3
+  - 4
+  - 5
+  - 7
   - 8
+  - 9
+  - 10
+  - 13
   - 16
+  - 19
+  - 20
+  - 21
+  - 23
 strategy_size_bonus:
   ema_cross:
   - 0
@@ -141,25 +174,7 @@ strategy_size_bonus:
   - 14
   - 22
 strategy_size_bonus_mult: 1.25
-symbol_block_directions:
-  BTCUSDT:
-  - short
-symbols:
-- ETHUSDT
-- BTCUSDT
-- DOGEUSDT
-- ARBUSDT
-- FILUSDT
-- ADAUSDT
-tier_block_symbols:
-  A:
-  - ADAUSDT
-  - ARBUSDT
-  - FILUSDT
-  S:
-  - ADAUSDT
-  - ARBUSDT
-  - FILUSDT
+symbols: *id001
 timeframes:
 - 1h
 - 4h
