@@ -80,7 +80,7 @@ risk:
   daily_drawdown_stop: -1.0
   max_positions: 10
   max_same_direction: 8
-  risk_per_trade: 0.099
+  risk_per_trade: 0.07
   tp_cooldown_hours: 6.0
 scorer:
   daily_ema_period: 200
