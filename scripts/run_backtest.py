@@ -25,6 +25,7 @@ from regime.detector import RegimeDetector
 from risk.circuit_breaker import CircuitBreaker
 from risk.correlation import CorrelationFilter
 from risk.guards import RiskGuards
+from risk.margin_tiers import MarginTierTable
 from risk.position_sizer import PositionSizer
 from signals.scorer import ConfluenceScorer
 from strategies.ema_cross import EMACrossStrategy
@@ -173,6 +174,8 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         ),
         price_tf=p.get("primary_timeframe", "1h"),  # 1d 슬리브용 — 기본 1h(v16 무영향)
         max_hold_hours=p.get("engine", {}).get("max_hold_hours"),
+        gap_sl_pessimistic=p.get("engine", {}).get("gap_sl_pessimistic", False),
+        margin_tier_table=MarginTierTable() if p.get("engine", {}).get("use_margin_tiers") else None,
         breakeven_trigger_r=p.get("engine", {}).get("breakeven_trigger_r"),
         trailing_r_mult=p.get("engine", {}).get("trailing_r_mult"),
         strategy_min_score=p.get("strategy_min_score"),

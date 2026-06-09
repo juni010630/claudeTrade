@@ -183,27 +183,19 @@ def main() -> None:
 
 
 def _print_row(label: str, report) -> None:
-    try:
-        s = report.stats
-        print(f"{label:12s}  {s.get('num_trades', 0):>6d}  "
-              f"{s.get('win_rate', 0):>5.1%}  "
-              f"{s.get('profit_factor', 0):>6.2f}  "
-              f"{s.get('sharpe', 0):>7.2f}  "
-              f"{s.get('max_drawdown', 0):>6.1%}  "
-              f"${s.get('final_equity', 0):>9,.0f}")
-    except Exception:
-        # MetricsReport API가 다를 수 있음 — 폴백
-        print(f"{label:12s}  (상세 통계 파싱 실패)")
+    print(f"{label:12s}  {report.total_trades:>6d}  "
+          f"{report.win_rate:>5.1%}  "
+          f"{report.profit_factor:>6.2f}  "
+          f"{report.sharpe:>7.2f}  "
+          f"{report.max_drawdown:>6.1%}  "
+          f"${report.final_equity:>9,.0f}")
 
 
 def _check_gates(results: dict) -> None:
     def _sharpe(lbl: str):
         if lbl not in results:
             return None
-        try:
-            return results[lbl]["report"].stats.get("sharpe", 0)
-        except Exception:
-            return None
+        return results[lbl]["report"].sharpe
 
     base_sh = _sharpe("baseline")
     bonus_sh = _sharpe("bonus")

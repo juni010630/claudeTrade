@@ -77,6 +77,7 @@ class BacktestEngine:
         strategy_size_bonus_mult: float = 1.5,                      # bonus 배율 (기본 1.5x)
         abort_mdd_threshold: float | None = None,  # e.g. -0.35 → MDD 35% 초과 시 조기 중단 (None=끝까지)
         subbar_tpsl: bool = False,  # True → trailing 없어도 sub-bar(5m)로 TP/SL 체크
+        gap_sl_pessimistic: bool = False,  # True → 봉 시가가 SL 관통 시 시가 체결 (라이브 갭 시장가 근사, 정직 MDD 측정용)
         isolated_margin: bool = False,  # True → 포지션별 isolated margin 청산 (cross 대신)
         equity_curve_trading: int = 0,   # >0 → equity SMA(N) 미만 시 사이징 50% 축소
         adx_scaling: bool = False,       # True → ADX 20-25 구간에서 사이징 60% 축소
@@ -161,6 +162,7 @@ class BacktestEngine:
         self._bankrupt = False
 
         self._subbar_tpsl = subbar_tpsl
+        self._gap_sl_pessimistic = gap_sl_pessimistic
         self._isolated_margin = isolated_margin
         self._equity_curve_trading = equity_curve_trading
         self._adx_scaling = adx_scaling
@@ -833,7 +835,7 @@ class BacktestEngine:
                         snapshot, sym, pos
                     )
                 elif hit_sl:
-                    exit_price, exit_reason = pos.sl_price, "sl"
+                    exit_price, exit_reason = self._sl_fill_price(pos, float(bar["open"])), "sl"
                 elif hit_tp:
                     exit_price, exit_reason = pos.tp_price, "tp"
                 else:
@@ -867,10 +869,9 @@ class BacktestEngine:
                 sub_hit_sl = sb_high >= pos.sl_price
                 sub_hit_tp = sb_low <= pos.tp_price
 
-            if sub_hit_sl and sub_hit_tp:
-                return pos.sl_price, "sl"  # 동시 → 보수적(SL)
             if sub_hit_sl:
-                return pos.sl_price, "sl"
+                # 동시 터치도 보수적(SL) — 갭 비관 옵션 시 sub-bar 시가 반영
+                return self._sl_fill_price(pos, float(sb["open"])), "sl"
             if sub_hit_tp:
                 return pos.tp_price, "tp"
 
@@ -881,6 +882,15 @@ class BacktestEngine:
         if hit_time:
             return bar_close, "timeout"
         return None
+
+    def _sl_fill_price(self, pos, bar_open: float) -> float:
+        """SL 체결가. gap_sl_pessimistic이면 봉 시가가 SL을 이미 관통한 갭에서
+        sl_price 대신 시가 체결 (라이브 갭 시장가 근사). 기본은 기존과 동일."""
+        if not self._gap_sl_pessimistic:
+            return pos.sl_price
+        if pos.direction == "long":
+            return min(pos.sl_price, bar_open)
+        return max(pos.sl_price, bar_open)
 
     def _pyramid_eligible(self, pos) -> bool:
         if self._pyramid_trigger_r is None or pos.adds_done >= self._pyramid_max_adds:
@@ -1131,10 +1141,13 @@ class BacktestEngine:
                 sub_hit_sl = sb_high >= v_sl
                 sub_hit_tp = sb_low <= pos.tp_price
 
-            if sub_hit_sl and sub_hit_tp:
-                return v_sl, "sl"   # 5m에서도 동시 → 보수적
             if sub_hit_sl:
-                return v_sl, "sl"
+                # 5m 동시 터치도 보수적(SL) — 갭 비관 옵션 시 sub-bar 시가 반영
+                fill = v_sl
+                if self._gap_sl_pessimistic:
+                    sb_open = float(sb["open"])
+                    fill = min(v_sl, sb_open) if pos.direction == "long" else max(v_sl, sb_open)
+                return fill, "sl"
             if sub_hit_tp:
                 return pos.tp_price, "tp"
 

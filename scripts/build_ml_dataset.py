@@ -78,6 +78,11 @@ def main() -> None:
     if abs(mismatch) > 5:
         print(f"  [WARN] 조인 불일치 {mismatch}건 — symbol_block_directions 등에 의한 정상적 차이일 수 있음")
 
+    # ML은 추세전략(ema/multi) 전용 — 슬리브(mean_reversion)는 별개 엣지라 제외
+    n_before = len(joined)
+    joined = joined[joined["strategy"] != "mean_reversion"]
+    print(f"  mean_reversion 제외: {n_before} → {len(joined)}건")
+
     # ── 피처 계산 ──────────────────────────────────────────────────
     print("피처 계산 중...")
     primary_tf = p.get("primary_timeframe", "1h")

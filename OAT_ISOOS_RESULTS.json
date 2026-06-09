@@ -1,0 +1,122 @@
+{
+  "IS": [
+    "2022-01-01",
+    "2024-12-31"
+  ],
+  "OOS": [
+    "2025-01-01",
+    "2026-04-14"
+  ],
+  "results": [
+    {
+      "name": "SS6+sd4+vol2.2",
+      "period": "OOS",
+      "ret": 933.6,
+      "final": 1034.0,
+      "mdd": -41.0,
+      "sharpe": 3.125,
+      "wr": 54.2,
+      "trades": 203,
+      "secs": 273.9
+    },
+    {
+      "name": "sd4+vol2.2",
+      "period": "OOS",
+      "ret": 991.6,
+      "final": 1092.0,
+      "mdd": -37.8,
+      "sharpe": 3.157,
+      "wr": 52.9,
+      "trades": 225,
+      "secs": 274.3
+    },
+    {
+      "name": "SS6+vol2.2",
+      "period": "OOS",
+      "ret": 938.8,
+      "final": 1039.0,
+      "mdd": -40.2,
+      "sharpe": 3.13,
+      "wr": 54.1,
+      "trades": 205,
+      "secs": 274.6
+    },
+    {
+      "name": "SS6+sd4",
+      "period": "OOS",
+      "ret": 1276.3,
+      "final": 1376.0,
+      "mdd": -35.5,
+      "sharpe": 3.437,
+      "wr": 54.6,
+      "trades": 205,
+      "secs": 275.1
+    },
+    {
+      "name": "baseline",
+      "period": "OOS",
+      "ret": 1172.7,
+      "final": 1273.0,
+      "mdd": -36.9,
+      "sharpe": 3.287,
+      "wr": 52.8,
+      "trades": 231,
+      "secs": 275.6
+    },
+    {
+      "name": "SS6+vol2.2",
+      "period": "IS",
+      "ret": 702.3,
+      "final": 802.0,
+      "mdd": -45.4,
+      "sharpe": 1.393,
+      "wr": 46.5,
+      "trades": 617,
+      "secs": 543.4
+    },
+    {
+      "name": "SS6+sd4",
+      "period": "IS",
+      "ret": 599.3,
+      "final": 699.0,
+      "mdd": -42.4,
+      "sharpe": 1.321,
+      "wr": 46.7,
+      "trades": 600,
+      "secs": 544.4
+    },
+    {
+      "name": "sd4+vol2.2",
+      "period": "IS",
+      "ret": 728.0,
+      "final": 828.0,
+      "mdd": -48.9,
+      "sharpe": 1.392,
+      "wr": 46.4,
+      "trades": 658,
+      "secs": 545.1
+    },
+    {
+      "name": "baseline",
+      "period": "IS",
+      "ret": 455.3,
+      "final": 555.0,
+      "mdd": -57.5,
+      "sharpe": 1.159,
+      "wr": 45.2,
+      "trades": 705,
+      "secs": 546.5
+    },
+    {
+      "name": "SS6+sd4+vol2.2",
+      "period": "IS",
+      "ret": 845.0,
+      "final": 945.0,
+      "mdd": -42.9,
+      "sharpe": 1.497,
+      "wr": 47.1,
+      "trades": 592,
+      "secs": 547.5
+    }
+  ]
+}

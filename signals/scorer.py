@@ -170,7 +170,7 @@ class ConfluenceScorer:
         # 8. ML (선택적 — ml_filter 설정 시만)
         ml_bonus = 0
         ml_cut = False
-        if self._ml_filter is not None:
+        if self._ml_filter is not None and signal.strategy in ("ema_cross", "multi_tf_breakout"):
             try:
                 from strategies.ml_filter import compute_features
                 _bars_1h = snapshot.bars.get(sym, {}).get("1h", pd.DataFrame())
