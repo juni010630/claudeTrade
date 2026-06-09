@@ -37,9 +37,13 @@ class LiveBroker:
         commission_maker: float = 0.0002,
         commission_taker: float = 0.0005,
         slippage_bps: float = 5.0,
+        demo: bool = False,
     ) -> None:
         self.exchange = exchange
         self.dry_run = dry_run
+        # demo(testnet): STOP_MARKET이 -4120으로 막혀 SL 등록 실패가 정상(sl_poller가 대체)
+        # → 단발 로그만. 메인넷(demo=False): STOP_MARKET이 유일한 거래소측 SL → 재시도+경보.
+        self.demo = demo
         self._leverage_cache: dict[str, int] = {}
         # BacktestEngine 이 참조하는 속성 (수수료/슬리피지 계산용).
         # 백테스트와 동일한 모델을 써야 청산 비용 계산이 일치한다.
@@ -88,18 +92,58 @@ class LiveBroker:
             except Exception as e:
                 logger.warning("TP 등록 실패 %s: %s", order.symbol, e)
 
-        # ── SL: 거래소 STOP_MARKET 시도, 실패 시 엔진 폴링 ──────────────
-        if sl > 0:
+        # ── SL: 거래소 STOP_MARKET ──────────────────────────────────────
+        if sl > 0 and not self.dry_run:
+            self._place_sl_stop(order, close_side, float(qty), float(sl))
+
+    def _place_sl_stop(self, order: Order, close_side: str, qty: float, sl: float) -> None:
+        """SL STOP_MARKET 등록. 메인넷은 재시도 후 실패 시 경보(거래소 SL 부재=무방비 위험),
+        testnet은 -4120 차단이 정상(sl_poller가 5m로 대체)이라 단발 로그만."""
+        def _create() -> None:
+            self.exchange.create_order(
+                order.symbol, "STOP_MARKET", close_side, qty,
+                None, {"stopPrice": sl, "reduceOnly": "true"},
+            )
+
+        if self.demo:
             try:
-                if not self.dry_run:
-                    self.exchange.create_order(
-                        order.symbol, "STOP_MARKET", close_side, float(qty),
-                        None, {"stopPrice": float(sl), "reduceOnly": "true"},
-                    )
-                    logger.info("SL(STOP_MARKET) 등록: %s @%.4f", order.symbol, sl)
+                _create()
+                logger.info("SL(STOP_MARKET) 등록: %s @%.4f", order.symbol, sl)
             except Exception as e:
-                logger.error("SL 거래소 등록 실패: %s @%.4f — %s: %s",
-                             order.symbol, sl, type(e).__name__, e)
+                logger.warning("SL 등록 실패(testnet 예상, sl_poller 대체): %s @%.4f — %s",
+                               order.symbol, sl, e)
+            return
+
+        # 메인넷: STOP_MARKET이 유일한 거래소측 SL → 재시도 후 실패 시 경보.
+        # reduceOnly라 혹시 중복 등록돼도 한 쪽만 청산·나머지는 무해(다음 봉 sync가 정리).
+        last_err = None
+        for attempt in range(3):
+            try:
+                _create()
+                logger.info("SL(STOP_MARKET) 등록: %s @%.4f", order.symbol, sl)
+                return
+            except Exception as e:
+                last_err = e
+                logger.warning("SL 등록 실패 재시도 %d/3 %s @%.4f — %s: %s",
+                               attempt + 1, order.symbol, sl, type(e).__name__, e)
+                if attempt < 2:  # 마지막 시도 후엔 즉시 경보 (불필요한 대기 제거)
+                    time.sleep(1.0 * (attempt + 1))
+        logger.error("SL 거래소 등록 최종 실패: %s @%.4f — %s: %s (거래소 SL 없음, 엔진 1h 백업만)",
+                     order.symbol, sl, type(last_err).__name__, last_err)
+        self._notify_sl_failure(order, sl, last_err)
+
+    def _notify_sl_failure(self, order: Order, sl: float, err) -> None:
+        if self.notifier is None or not getattr(self.notifier, "enabled", False):
+            return
+        try:
+            self.notifier.notify_info(
+                f"🚨 <b>SL 등록 실패 — 거래소 측 손절 없음!</b>\n"
+                f"{order.symbol} {order.direction} | SL @{sl:.4f}\n"
+                f"사유: {type(err).__name__}: {str(err)[:150]}\n"
+                f"⚠️ 엔진 1h 백업 청산만 작동 — 수동 확인 권장"
+            )
+        except Exception as e:
+            logger.warning("SL 실패 경보 전송 실패: %s", e)
 
     # ── 메인: 주문 실행 ──────────────────────────────────────────────
     def submit(self, order: Order, current_bar: Optional[pd.Series] = None) -> Fill:
@@ -128,18 +172,23 @@ class LiveBroker:
         except Exception:
             qty = round(qty, 6)
 
+        # 최소수량/정밀도 보정으로 실제 체결 수량이 의도(size_usd/price)와 달라질 수 있음.
+        # tracker가 거래소와 동일 노셔널을 기록하도록 order.size_usd를 실제 수량 기준으로 보정.
+        final_qty = float(qty)
+
         logger.info(
             "[%s] %s %s %.4f @ %.4f  (TP=%.4f SL=%.4f)  dry=%s",
-            order.strategy, symbol, side, float(qty), price,
+            order.strategy, symbol, side, final_qty, price,
             order.tp_price, order.sl_price, self.dry_run,
         )
 
         if self.dry_run:
+            order.size_usd = final_qty * price
             fill = Fill(
                 order=order,
                 fill_price=price,
-                commission=self.commission.calculate(size_usd, OrderType.MARKET),
-                slippage_cost=self.slippage.cost(size_usd, OrderType.MARKET),
+                commission=self.commission.calculate(order.size_usd, OrderType.MARKET),
+                slippage_cost=self.slippage.cost(order.size_usd, OrderType.MARKET),
                 timestamp=pd.Timestamp.now(tz="UTC"),
             )
             self._notify_entry(order, price)
@@ -177,8 +226,10 @@ class LiveBroker:
             raise ccxt.NetworkError("3회 재시도 후에도 주문 실패")
 
         fill_price = float(result.get("average") or result.get("price") or price)
+        # 실제 체결 수량×체결가 = 실제 노셔널 → tracker가 거래소와 동일 size 기록
+        order.size_usd = final_qty * fill_price
         fee_info   = result.get("fee") or {}
-        commission = float(fee_info.get("cost") or self.commission.calculate(size_usd, OrderType.MARKET))
+        commission = float(fee_info.get("cost") or self.commission.calculate(order.size_usd, OrderType.MARKET))
         ts         = pd.Timestamp.now(tz="UTC")
 
         fill = Fill(
@@ -190,7 +241,7 @@ class LiveBroker:
         )
 
         # TP/SL 등록
-        self._place_tp_sl(order, fill_price, float(qty))
+        self._place_tp_sl(order, fill_price, final_qty)
 
         self._notify_entry(order, fill_price)
         return fill

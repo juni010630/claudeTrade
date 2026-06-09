@@ -153,8 +153,11 @@ class SLPoller:
                 commission = self.broker.commission.calculate(
                     exit_notional, OrderType.MARKET
                 )
-                slip = self.broker.slippage.cost(
-                    exit_notional, OrderType.MARKET
+                # actual_fill(실제 체결가)엔 슬리피지가 이미 반영됨 → 이중부과 방지.
+                # SL 가격 폴백일 때만 이론 슬리피지 부과 (live_broker.submit과 동일 관례).
+                slip = (
+                    0.0 if actual_fill is not None
+                    else self.broker.slippage.cost(exit_notional, OrderType.MARKET)
                 )
                 exit_regime = MarketRegime.RANGING
 

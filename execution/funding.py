@@ -12,6 +12,15 @@ class FundingRateSimulator:
         self._bucket_freq = f"{interval_hours}h"
         self._last_bucket: pd.Timestamp | None = None
 
+    def sync_to(self, now: pd.Timestamp) -> None:
+        """라이브 재기동 시 호출 — 현재 펀딩 버킷을 '이미 정산됨'으로 표시.
+
+        live_trade의 state 복원이 cash를 실잔고로 재앵커링하면 해당 버킷 펀딩이
+        이미 반영되므로, 첫 봉에서 같은 버킷을 중복 부과하지 않도록 한다.
+        다음 정산 경계(예: 다음 00/08/16 UTC)부터 정상 부과 — 펀딩 누락 없음.
+        """
+        self._last_bucket = now.floor(self._bucket_freq)
+
     def accrue(
         self,
         state: PortfolioState,

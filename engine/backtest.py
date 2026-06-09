@@ -1073,9 +1073,13 @@ class BacktestEngine:
                 rev_tp = rev_price + atr_dist * 0.7
                 rev_sl = rev_price - sl_dist
             rev_size = pos.size_usd * 0.5 * (self._sl_reversal_leverage / pos.leverage)
+            _rev_sig = type('S', (), {
+                'direction': rev_dir, 'symbol': sym,
+                'strategy': pos.strategy + "_rev",
+                'timestamp': snapshot.timestamp,
+            })()
             if rev_size > 0 and self.guards.is_entry_allowed(
-                self.tracker.snapshot(),
-                type('S', (), {'direction': rev_dir, 'symbol': sym})()
+                self.tracker.snapshot(), _rev_sig
             ):
                 rev_order = Order(
                     symbol=sym, side=rev_side, size_usd=rev_size,

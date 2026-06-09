@@ -64,3 +64,29 @@ class CircuitBreaker:
         """수동 리셋 (검토 후)."""
         self._global_stopped_until = None
         self._global_losses = 0
+
+    def to_state(self) -> dict:
+        """런타임 상태 직렬화 (라이브 재기동 복원용 — JSON 가능 형태)."""
+        return {
+            "strategy_losses": dict(self._strategy_losses),
+            "strategy_paused_until": {
+                k: v.isoformat() for k, v in self._strategy_paused_until.items()
+            },
+            "global_losses": self._global_losses,
+            "global_stopped_until": (
+                self._global_stopped_until.isoformat()
+                if self._global_stopped_until is not None else None
+            ),
+        }
+
+    def load_state(self, data: dict) -> None:
+        """to_state로 직렬화된 상태 복원. 누락 키는 기본값(빈 상태)."""
+        self._strategy_losses = {
+            k: int(v) for k, v in data.get("strategy_losses", {}).items()
+        }
+        self._strategy_paused_until = {
+            k: pd.Timestamp(v) for k, v in data.get("strategy_paused_until", {}).items()
+        }
+        self._global_losses = int(data.get("global_losses", 0))
+        gs = data.get("global_stopped_until")
+        self._global_stopped_until = pd.Timestamp(gs) if gs else None

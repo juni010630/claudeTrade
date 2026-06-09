@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_PATH = Path("data/state.json")
 
 
-def save(state: PortfolioState, path: Path = DEFAULT_PATH) -> None:
+def save(state: PortfolioState, path: Path = DEFAULT_PATH, engine=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     positions = {}
     for sym, pos in state.positions.items():
@@ -48,6 +48,15 @@ def save(state: PortfolioState, path: Path = DEFAULT_PATH) -> None:
         "positions": positions,
         "saved_at": pd.Timestamp.now(tz="UTC").isoformat(),
     }
+    # 엔진 런타임 상태(서킷브레이커 연속손절/정지, TP 쿨다운) — 재기동 시 손실 방어 가드 유지.
+    # 포지션과 달리 인메모리라 미저장 시 매 재기동마다 0으로 리셋됨.
+    if engine is not None:
+        cb = getattr(engine, "circuit_breaker", None)
+        if cb is not None and hasattr(cb, "to_state"):
+            data["circuit_breaker"] = cb.to_state()
+        guards = getattr(engine, "guards", None)
+        if guards is not None and hasattr(guards, "to_state"):
+            data["guards"] = guards.to_state()
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     tmp.replace(path)
@@ -96,3 +105,32 @@ def load(path: Path = DEFAULT_PATH) -> PortfolioState | None:
     logger.info("state 복원: equity=%.2f, positions=%d, saved=%s",
                 state.equity, len(positions), saved_at)
     return state
+
+
+def restore_runtime(engine, path: Path = DEFAULT_PATH) -> None:
+    """CircuitBreaker / RiskGuards 런타임 상태 복원 (포지션 유무와 무관).
+
+    포지션이 0(flat)이어도 STOP/PAUSE·연속손절·TP 쿨다운은 유지돼야 하므로
+    save()의 positions 복원과 별개로 항상 호출한다. 저장 파일이 없거나 해당 키가
+    없으면 no-op (신규 시작·구버전 state.json 호환).
+    """
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text())
+    except Exception as e:
+        logger.error("runtime state 로드 실패: %s", e)
+        return
+    cb = getattr(engine, "circuit_breaker", None)
+    cb_data = data.get("circuit_breaker")
+    if cb_data and cb is not None and hasattr(cb, "load_state"):
+        cb.load_state(cb_data)
+        logger.info(
+            "CircuitBreaker 복원: global_losses=%d, strategy_losses=%s",
+            cb._global_losses, dict(cb._strategy_losses),
+        )
+    guards = getattr(engine, "guards", None)
+    g_data = data.get("guards")
+    if g_data and guards is not None and hasattr(guards, "load_state"):
+        guards.load_state(g_data)
+        logger.info("TP 쿨다운 복원: %d건", len(guards._last_tp_times))

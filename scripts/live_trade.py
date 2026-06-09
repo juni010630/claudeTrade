@@ -294,6 +294,7 @@ def main() -> None:
         commission_maker=exec_cfg.get("commission_maker", 0.0002),
         commission_taker=exec_cfg.get("commission_taker", 0.0005),
         slippage_bps=exec_cfg.get("default_slippage_bps", 5.0),
+        demo=demo,  # testnet=SL -4120 정상(sl_poller 대체)/메인넷=SL 재시도+경보 구분
     )
 
     # 잔고 확인 (엔진 초기 자본으로 사용)
@@ -345,6 +346,9 @@ def main() -> None:
             engine.tracker.state.daily_start_equity = saved.daily_start_equity
             # 같은 날 재시작 시 reset_daily() 건너뛰도록 _last_day 설정
             engine._last_day = pd.Timestamp.now(tz="UTC")
+            # cash가 실잔고로 재앵커링됨(실잔고엔 이미 정산 펀딩 반영) → 현재 펀딩 버킷을
+            # '정산됨'으로 표시해 첫 봉에서 같은 버킷 펀딩 중복부과 방지
+            engine.funding_sim.sync_to(pd.Timestamp.now(tz="UTC"))
             logger.info("state 복원 완료: %d 포지션, cash=%.2f (거래소 잔고), daily_start=%.2f",
                         restored, engine.tracker.state.cash, saved.daily_start_equity)
         else:
@@ -352,11 +356,17 @@ def main() -> None:
     else:
         logger.info("저장된 state 없음 → 신규 시작")
 
+    # CB 연속손절/정지·TP 쿨다운 복원 (포지션 유무 무관 — flat이어도 STOP/PAUSE 유지).
+    # systemd Restart=always 환경에서 재기동마다 손실 방어 가드가 0으로 리셋되는 것을 방지.
+    state_store.restore_runtime(engine)
+
     logger.info("엔진 초기화 완료 (전략 %d개)", len(engine.strategies))
 
     # LiveFeed 생성
     symbols    = params["symbols"]
-    timeframes = params.get("timeframes", ["1h", "4h", "1d"])
+    # 백테(run_backtest)는 p["timeframes"]를 필수 키로 사용 → 라이브도 동일하게 필수.
+    # 기본값을 두면 config 누락 시 백테와 다른 TF로 조용히 동작(패리티 깨짐).
+    timeframes = params["timeframes"]
     feed = LiveFeed(
         symbols=symbols,
         timeframes=timeframes,
@@ -426,7 +436,10 @@ def main() -> None:
                 bar_count += 1
                 logger.info("─── 봉 #%d | %s ───", bar_count, snapshot.timestamp)
 
-                # stale 데이터 방어: snapshot이 2봉 이상 지연이면 시그널 무시 (청산만 처리)
+                # stale 데이터 방어: snapshot이 2봉 이상 지연이면 이 봉 전체를 건너뜀
+                # (진입·청산·MTM 모두 미처리 — stale 가격에 행동하지 않음). 메인넷은
+                # 거래소 STOP_MARKET이 SL을 커버하고, 다음 정상 봉의 거래소 sync가
+                # 그 사이 체결을 tracker/CB에 정산함.
                 staleness = (pd.Timestamp.now(tz="UTC") - snapshot.timestamp).total_seconds()
                 if staleness > 7200:  # 2시간 이상 지연
                     logger.warning("stale 데이터 감지 (%.0f초 지연) — 이 봉 건너뜀", staleness)
@@ -444,7 +457,8 @@ def main() -> None:
                 )
 
                 # state 디스크 저장 (매 봉 — 크래시 복구용)
-                state_store.save(state)
+                # engine 전달 → CB 연속손절/정지·TP 쿨다운도 함께 영속화
+                state_store.save(state, engine=engine)
 
                 # 매 봉 텔레그램 알림 (포지션 있을 때만)
                 if notifier and notifier.enabled and state.open_position_count > 0:
@@ -556,8 +570,8 @@ def main() -> None:
     finally:
         if sl_poller is not None:
             sl_poller.stop()
-        # 종료 전 state 저장
-        state_store.save(engine.tracker.snapshot())
+        # 종료 전 state 저장 (CB/쿨다운 포함)
+        state_store.save(engine.tracker.snapshot(), engine=engine)
         logger.info("종료 전 state 저장 완료")
         # 최종 성과 출력
         report = MetricsReport.from_run(engine.equity_curve, engine.ledger)

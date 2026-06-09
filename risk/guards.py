@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+import pandas as pd
+
 from risk.models import PortfolioState
 from signals.models import Signal
 
@@ -77,3 +79,20 @@ class RiskGuards:
         if self.is_cooldown_active(signal.symbol, signal.strategy, signal.timestamp):
             return False
         return True
+
+    def to_state(self) -> dict:
+        """TP 쿨다운 타임스탬프 직렬화 (라이브 재기동 복원용)."""
+        return {
+            "last_tp_times": {
+                f"{sym}\t{strat}": ts.isoformat()
+                for (sym, strat), ts in self._last_tp_times.items()
+            },
+        }
+
+    def load_state(self, data: dict) -> None:
+        """to_state로 직렬화된 TP 쿨다운 복원. 누락 시 빈 상태."""
+        out: dict[tuple[str, str], pd.Timestamp] = {}
+        for key, ts in data.get("last_tp_times", {}).items():
+            sym, strat = key.split("\t", 1)
+            out[(sym, strat)] = pd.Timestamp(ts)
+        self._last_tp_times = out
