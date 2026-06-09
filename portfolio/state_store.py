@@ -38,6 +38,8 @@ def save(state: PortfolioState, path: Path = DEFAULT_PATH) -> None:
             "entry_commission": pos.entry_commission,
             "entry_slippage": pos.entry_slippage,
             "confluence_score": pos.confluence_score,
+            "adds_done": pos.adds_done,        # 피라미딩 증액 횟수 (재기동 시 max_adds 보존)
+            "order_price": pos.order_price,    # 진입 의도가 (청산알림 슬리피지% 계산용)
         }
     data = {
         "equity": state.equity,
@@ -80,6 +82,8 @@ def load(path: Path = DEFAULT_PATH) -> PortfolioState | None:
             entry_commission=p.get("entry_commission", 0.0),
             entry_slippage=p.get("entry_slippage", 0.0),
             confluence_score=p.get("confluence_score", 0),
+            adds_done=p.get("adds_done", 0),
+            order_price=p.get("order_price", 0.0),
         )
 
     state = PortfolioState(

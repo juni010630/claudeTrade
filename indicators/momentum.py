@@ -1,4 +1,10 @@
-"""모멘텀 지표 — 순수 함수."""
+"""모멘텀 지표 — 순수 함수.
+
+⚠️ RSI는 표준 Wilder(alpha=1/period) 평활이 아니라 ewm(span=period)를 쓴다. 외부
+   도구(TA-Lib/TradingView)와 값이 체계적으로 다르나, 백테=라이브가 동일 함수를 공유하고
+   모든 임계값이 이 정의로 캘리브레이션됨. Wilder로 바꾸면 전 백테가 변하니 변경 금지(변경 시
+   연도별 전 파라미터 재검증 필수). 외부 비교용 컨벤션 차이일 뿐 결함 아님.
+"""
 from __future__ import annotations
 
 import pandas as pd

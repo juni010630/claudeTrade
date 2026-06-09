@@ -32,12 +32,15 @@ class ConfluenceScorer:
         funding_long_max: float = 0.0003,
         funding_short_min: float = -0.0003,
         daily_ema_period: int = 200,
-        tier_sss_min_score: int = 99,  # 기본 비활성 — yaml에서 명시적으로 설정
-        tier_ss_min_score: int = 7,   # 완벽한 신호 (최고점)
-        tier_s_min_score: int = 5,
+        # ⚠️ 아래 기본값은 운영 스키마(SSS6/SS5/S4/A3)와 다름 — 모든 운영 config가
+        #    scorer.tier_*_min_score를 명시 override한다(예: merged_noblock_sleeve). 새 config
+        #    작성 시 scorer 블록을 빠뜨리면 이 기본값(SS=7=거의 도달불가)이 적용되니 주의.
+        tier_sss_min_score: int = 99,  # 기본 비활성 (운영=6)
+        tier_ss_min_score: int = 7,    # 운영=5
+        tier_s_min_score: int = 5,     # 운영=4
         tier_a_min_score: int = 3,
         tier_b_min_score: int = 2,
-        tier_c_min_score: int = 1,    # 최소 신호 탐색
+        tier_c_min_score: int = 1,
         regime_strong_adx: float | None = None,    # ADX >= 이 값 → +2 (None=비활성)
         regime_high_adx_cutoff: float | None = None,  # ADX >= 이 값 → +0 (너무 강한 추세 차단)
         ml_filter: "MLSignalFilter | None" = None,

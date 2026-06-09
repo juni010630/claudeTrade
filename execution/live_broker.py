@@ -178,7 +178,7 @@ class LiveBroker:
 
         fill_price = float(result.get("average") or result.get("price") or price)
         fee_info   = result.get("fee") or {}
-        commission = float(fee_info.get("cost") or size_usd * 0.0005)
+        commission = float(fee_info.get("cost") or self.commission.calculate(size_usd, OrderType.MARKET))
         ts         = pd.Timestamp.now(tz="UTC")
 
         fill = Fill(

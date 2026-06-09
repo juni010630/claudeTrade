@@ -30,7 +30,12 @@ def avg_rr(ledger_df: pd.DataFrame) -> float:
 
 
 def consecutive_losses(ledger_df: pd.DataFrame) -> int:
-    """전체 기간 최대 연속 손절 횟수."""
+    """전체 기간 최대 연속 손절 횟수.
+
+    win_rate/profit_factor/avg_rr는 break-even(pnl==0)을 양쪽서 제외하나, 여기선 <=0로
+    손절에 포함(보수적). 실현 pnl은 수수료 차감 후라 정확히 0이 사실상 없어 표시값 차이는
+    없음. 이 지표는 report 표시용으로만 소비(엔진/리스크 미사용) — CB는 자체 pnl>0 판정.
+    """
     if ledger_df.empty:
         return 0
     is_loss = (ledger_df["pnl"] <= 0).astype(int)

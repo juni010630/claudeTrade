@@ -1,4 +1,10 @@
-"""추세 관련 지표 — 순수 함수, 사이드 이펙트 없음."""
+"""추세 관련 지표 — 순수 함수, 사이드 이펙트 없음.
+
+⚠️ ATR/ADX는 표준 Wilder(alpha=1/period) 평활이 아니라 ewm(span=period)를 쓴다(값이
+   외부 도구보다 ~1.87배 민감). 백테=라이브 동일 함수·동일 캘리브레이션이라 내부 일관성은
+   완전하나, Wilder로 바꾸면 모든 ATR거리(SL/TP)·ADX게이트가 변해 전 백테 재검증이 필요하다.
+   외부 ADX/ATR과 절대값 직접 비교 불가 — 본 구현 전용 임계값. 변경 금지.
+"""
 from __future__ import annotations
 
 import numpy as np
