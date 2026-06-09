@@ -417,6 +417,14 @@ class BacktestEngine:
                     )
                     if exit_reason == "tp":
                         self.guards.record_tp(sym, pos.strategy, now)
+                    # 거래소측 TP/SL/외부 체결도 백테(_close_with_reason)·테스트넷
+                    # (sl_poller)과 동일하게 CB에 승/패 기록 — 라이브 연속손절 차단 패리티.
+                    # SL STOP_MARKET은 슬리피지로 가격매칭이 불안정해 external_close로
+                    # 분류되므로, reason이 아닌 실현 pnl 부호로 판정해야 손실이 누락되지 않음.
+                    last_trade = self.ledger._records[-1] if self.ledger._records else None
+                    self.circuit_breaker.record_result(
+                        pos.strategy, last_trade is not None and last_trade.pnl > 0
+                    )
                     # 잔여 주문 정리 — 특히 비-reduceOnly 피라미드 STOP은
                     # 포지션 청산 후에도 살아남아 고아 포지션을 열 수 있음
                     if hasattr(self.broker, "cancel_all_orders"):
