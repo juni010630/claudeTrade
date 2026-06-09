@@ -460,19 +460,27 @@ def main() -> None:
                 # engine 전달 → CB 연속손절/정지·TP 쿨다운도 함께 영속화
                 state_store.save(state, engine=engine)
 
-                # 매 봉 텔레그램 알림 (포지션 있을 때만)
-                if notifier and notifier.enabled and state.open_position_count > 0:
-                    pos_lines = []
-                    for sym, pos in state.positions.items():
-                        pos_lines.append(
-                            f"  {sym} {pos.direction}  진입 {pos.entry_price:,.4f} | "
-                            f"PnL ${pos.unrealized_pnl:+,.2f} x{pos.leverage}"
+                # 매 봉(매시간) 텔레그램 알림 — 항상 발송. 포지션 유무로 내용만 구분:
+                #   포지션 0 → "잘 돌아감", 보유 시 → 심볼/진입가/현재 PnL
+                if notifier and notifier.enabled:
+                    header = f"#{bar_count} | {snapshot.timestamp.strftime('%m-%d %H:%M')} UTC"
+                    if state.open_position_count > 0:
+                        pos_lines = []
+                        for sym, pos in state.positions.items():
+                            pos_lines.append(
+                                f"  {sym} {pos.direction} 진입 {pos.entry_price:,.4f} | "
+                                f"PnL ${pos.unrealized_pnl:+,.2f} x{pos.leverage}"
+                            )
+                        notifier.notify_info(
+                            f"📊 {header}\n"
+                            f"잔고: ${state.equity:,.2f} | DD: {state.daily_pnl_pct*100:+.1f}%\n"
+                            f"포지션: {state.open_position_count}개\n" + "\n".join(pos_lines)
                         )
-                    notifier.notify_info(
-                        f"#{bar_count} | {snapshot.timestamp.strftime('%m-%d %H:%M')} UTC\n"
-                        f"잔고: ${state.equity:,.2f} | DD: {state.daily_pnl_pct*100:+.1f}%\n"
-                        f"포지션: {state.open_position_count}개\n" + "\n".join(pos_lines)
-                    )
+                    else:
+                        notifier.notify_info(
+                            f"✅ 잘 돌아감 | {header}\n"
+                            f"잔고: ${state.equity:,.2f} | 포지션 0 | DD: {state.daily_pnl_pct*100:+.1f}%"
+                        )
 
                 # 잔고 대조 (10봉마다) — 예측 장부 vs 실제 잔고 괴리 측정·원인분해·경보·안전동기화
                 if bar_count % 10 == 0:
@@ -526,34 +534,6 @@ def main() -> None:
                             "누적 거래: %d건 | 승률: %.0f%% | PnL: %.2f USDT",
                             closed, 100 * wins / closed, total_pnl,
                         )
-
-                # heartbeat (12봉 = 12시간마다)
-                if bar_count % 12 == 0 and notifier and notifier.enabled:
-                    trades = engine.ledger.records
-                    n = len(trades)
-                    if n > 0:
-                        wins = sum(1 for t in trades if t.pnl > 0)
-                        wr_pct = wins / n * 100
-                        gross_win  = sum(t.pnl for t in trades if t.pnl > 0)
-                        gross_loss = abs(sum(t.pnl for t in trades if t.pnl <= 0))
-                        pf = gross_win / gross_loss if gross_loss else float("inf")
-                        cum_pnl = sum(t.pnl for t in trades)
-                    else:
-                        wr_pct, pf, cum_pnl = 0.0, 0.0, 0.0
-                    try:
-                        notifier.notify_heartbeat(
-                            interval_h=12,
-                            bar_count=bar_count,
-                            equity=state.equity,
-                            initial_capital=usdt or state.equity,
-                            positions=state.open_position_count,
-                            trades=n,
-                            wr_pct=wr_pct,
-                            pf=pf,
-                            cum_pnl=cum_pnl,
-                        )
-                    except Exception:
-                        pass
 
     except KeyboardInterrupt:
         shutdown_reason = "사용자 중단 (Ctrl+C)"
