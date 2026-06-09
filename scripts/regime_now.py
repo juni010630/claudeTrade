@@ -64,7 +64,7 @@ def fetch_cache(symbols: list[str], tf: str, lookback: int) -> dict[str, pd.Data
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="실시간 추세장/횡보장 스위치")
-    parser.add_argument("--params", default="config/merged_noblock_sleeve.yaml")
+    parser.add_argument("--params", default="config/final_v17.yaml")
     parser.add_argument("--symbols", nargs="*", default=None, help="직접 심볼 지정")
     parser.add_argument("--tf", default="1h", help="판별 타임프레임 (1h/4h/1d)")
     parser.add_argument("--source", choices=["auto", "live", "cache"], default="auto")

@@ -15,7 +15,7 @@ from scripts.run_backtest import build_engine as build_bt
 from scripts.live_trade import build_engine as build_live
 from execution.live_broker import LiveBroker
 
-CONFIG = Path(__file__).resolve().parents[2] / "config" / "merged_noblock_sleeve.yaml"
+CONFIG = Path(__file__).resolve().parents[2] / "config" / "final_v17.yaml"
 
 
 def _params(e) -> dict:
