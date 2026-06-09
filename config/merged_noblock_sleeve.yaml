@@ -79,7 +79,7 @@ risk:
   daily_drawdown_pause: -1.0
   daily_drawdown_stop: -1.0
   max_positions: 10
-  max_same_direction: 8
+  max_same_direction: 4
   risk_per_trade: 0.07
   tp_cooldown_hours: 6.0
 scorer:
@@ -95,7 +95,7 @@ scorer:
   tier_b_min_score: 99
   tier_c_min_score: 99
   tier_s_min_score: 4
-  tier_ss_min_score: 5
+  tier_ss_min_score: 6
   tier_sss_min_score: 6
   volume_ratio_threshold: 1.8
 strategies:
