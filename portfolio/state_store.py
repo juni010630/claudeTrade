@@ -57,6 +57,8 @@ def save(state: PortfolioState, path: Path = DEFAULT_PATH, engine=None) -> None:
         guards = getattr(engine, "guards", None)
         if guards is not None and hasattr(guards, "to_state"):
             data["guards"] = guards.to_state()
+        # 딥플로어 피크 — 재기동 시 피크가 현재 잔고로 리셋되면 플로어가 느슨해짐
+        data["peak_equity"] = getattr(engine, "_peak_equity", None)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     tmp.replace(path)
@@ -134,3 +136,8 @@ def restore_runtime(engine, path: Path = DEFAULT_PATH) -> None:
     if g_data and guards is not None and hasattr(guards, "load_state"):
         guards.load_state(g_data)
         logger.info("TP 쿨다운 복원: %d건", len(guards._last_tp_times))
+    # 딥플로어 피크 복원 — max()로 재기동이 피크를 낮추지 못하게 보장
+    pk = data.get("peak_equity")
+    if pk is not None and hasattr(engine, "_peak_equity"):
+        engine._peak_equity = max(engine._peak_equity, float(pk))
+        logger.info("딥플로어 피크 복원: %.2f", engine._peak_equity)

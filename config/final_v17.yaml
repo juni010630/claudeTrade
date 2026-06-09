@@ -78,6 +78,7 @@ risk:
   correlation_lookback: 100
   daily_drawdown_pause: -1.0
   daily_drawdown_stop: -1.0
+  deep_floor_dd: -0.55  # running peak 대비 계좌 DD 플로어. 인샘플 0발동(파산보험). 백테=early-stop, 라이브=전량청산+정지
   max_positions: 10
   max_same_direction: 4
   risk_per_trade: 0.07

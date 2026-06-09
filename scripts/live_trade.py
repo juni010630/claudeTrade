@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -59,6 +60,11 @@ logger = logging.getLogger("live_trade")
 
 # ── 기본 파라미터 파일 ────────────────────────────────────────────
 DEFAULT_PARAMS = "config/final_v17.yaml"  # 채택 2026-06-09: 무차단+슬리브 50:50
+
+# ── 딥플로어 정지 플래그 ──────────────────────────────────────────
+# 발동 시 생성 → systemd Restart=always가 재기동해도 이 파일이 있으면 거래 재개 안 함.
+# 해제(수동): rm data/deep_floor_halt.json && sudo systemctl restart trade-bot
+DEEP_FLOOR_HALT = Path("data/deep_floor_halt.json")
 
 
 # ── ccxt Exchange 생성 ────────────────────────────────────────────
@@ -239,6 +245,7 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         btc_mom_lookback=p.get("btc_regime", {}).get("mom_lookback", 20),
         equity_curve_trading=p.get("equity_curve_trading", 0),
         adx_scaling=p.get("adx_scaling", False),
+        abort_mdd_threshold=r.get("deep_floor_dd"),  # 딥플로어 — 루프에서 _aborted 감지 시 전량청산+정지
         notifier=notifier,
         trade_log_path="trades.csv",
     )
@@ -288,6 +295,26 @@ def main() -> None:
         logger.info("텔레그램 알림 활성화 (chat_id=%s)", notifier.chat_id)
     else:
         logger.info("텔레그램 알림 비활성 (TELEGRAM_BOT_TOKEN/CHAT_ID 미설정)")
+
+    # 딥플로어 정지 상태 — 거래 없이 대기 (systemd 재기동 루프 방지용으로 exit 대신 sleep)
+    if DEEP_FLOOR_HALT.exists():
+        try:
+            halt_info = json.loads(DEEP_FLOOR_HALT.read_text())
+        except Exception:
+            halt_info = {}
+        logger.error("⛔ 딥플로어 정지 상태 (%s) — 거래하지 않음. 해제: rm %s 후 재시작",
+                     halt_info.get("triggered_at", "?"), DEEP_FLOOR_HALT)
+        if notifier and notifier.enabled:
+            notifier.notify_info(
+                f"⛔ <b>딥플로어 정지 상태</b> — 거래 재개 안 함\n"
+                f"발동: {halt_info.get('triggered_at', '?')} | "
+                f"equity ${halt_info.get('equity', 0):,.2f} / peak ${halt_info.get('peak', 0):,.2f}\n"
+                f"해제: <code>rm {DEEP_FLOOR_HALT}</code> 후 재시작"
+            )
+        while True:
+            time.sleep(21600)  # 6시간마다 리마인더
+            if notifier and notifier.enabled:
+                notifier.notify_info("⛔ 딥플로어 정지 유지 중 (거래 없음)")
 
     # Exchange + Broker 생성 (수수료/슬리피지는 백테스트와 동일하게 config 값 사용)
     exec_cfg = params.get("execution", {})
@@ -421,6 +448,7 @@ def main() -> None:
 
     # ── 실행 루프 ──
     bar_count = 0
+    deep_floor_fired = False
     try:
         if args.snap_now:
             # 즉시 한 번만 실행 (연결 테스트)
@@ -451,6 +479,35 @@ def main() -> None:
                 with engine_lock:
                     engine._process_bar(snapshot)
                     state = engine.tracker.snapshot()
+
+                # 딥플로어: running peak 대비 DD가 deep_floor_dd 초과 → 전량 청산 + 정지.
+                # 플래그를 청산보다 먼저 기록 — 청산 중 크래시해도 재기동 시 거래 재개 안 함.
+                if engine._aborted:
+                    peak = engine._peak_equity
+                    dd = (state.equity - peak) / peak * 100 if peak > 0 else 0.0
+                    logger.error("⛔ 딥플로어 발동: equity %.2f / peak %.2f (DD %+.1f%%)",
+                                 state.equity, peak, dd)
+                    DEEP_FLOOR_HALT.write_text(json.dumps({
+                        "triggered_at": snapshot.timestamp.isoformat(),
+                        "equity": state.equity, "peak": peak, "dd_pct": dd,
+                    }, indent=2))
+                    with engine_lock:
+                        prices = engine._get_prices(snapshot)
+                        for sym in list(state.positions.keys()):
+                            engine._force_close(sym, prices.get(sym, 0.0),
+                                                snapshot.timestamp, "deep_floor")
+                        state = engine.tracker.snapshot()
+                    state_store.save(state, engine=engine)
+                    if notifier and notifier.enabled:
+                        notifier.notify_info(
+                            f"⛔ <b>딥플로어 발동 — 전량 청산·거래 정지</b>\n"
+                            f"equity ${state.equity:,.2f} / peak ${peak:,.2f} (DD {dd:+.1f}%)\n"
+                            f"남은 포지션: {state.open_position_count}개"
+                            f"{' — emergency_stop.py로 정리 필요' if state.open_position_count else ''}\n"
+                            f"재개: <code>rm {DEEP_FLOOR_HALT}</code> 후 재시작"
+                        )
+                    deep_floor_fired = True
+                    break
 
                 logger.info(
                     "자산: %.2f USDT | 포지션: %d개 | 일일DD: %.2f%%",
@@ -548,8 +605,12 @@ def main() -> None:
         shutdown_emoji = "🔥"
         logger.exception("예상치 못한 오류: %s", e)
     else:
-        shutdown_reason = "정상 종료"
-        shutdown_emoji = "⏹"
+        if deep_floor_fired:
+            shutdown_reason = "딥플로어 발동 (전량 청산·거래 정지)"
+            shutdown_emoji = "⛔"
+        else:
+            shutdown_reason = "정상 종료"
+            shutdown_emoji = "⏹"
     finally:
         if sl_poller is not None:
             sl_poller.stop()

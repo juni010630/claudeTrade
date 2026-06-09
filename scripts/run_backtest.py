@@ -210,7 +210,7 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         equity_curve_trading=engine_kwargs.pop("equity_curve_trading",
                                                p.get("equity_curve_trading", 0)),
         adx_scaling=engine_kwargs.pop("adx_scaling", p.get("adx_scaling", False)),
-        abort_mdd_threshold=abort_mdd,
+        abort_mdd_threshold=abort_mdd if abort_mdd is not None else r.get("deep_floor_dd"),
         isolated_margin=isolated_margin,
         **engine_kwargs,
     )
