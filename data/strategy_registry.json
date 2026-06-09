@@ -3,7 +3,7 @@
   "strategies": {
     "merged_v16_sleeve_5050": {
       "config": "config/merged_v16_sleeve.yaml",
-      "status": "live (2026-06-09 배포, 첫 실거래 모니터링 중)",
+      "status": "live→교체대기 (funding3, 06-08 21:28~ 메인넷 가동. no-block로 교체 예정)",
       "desc": "단일계좌 병합: v16(funding3)+슬리브 평균회귀, per-strategy 레버(슬리브 flat lev3)+capital_fraction 0.5/0.5, daily DD stop off. 2026-06-09 채택(5:5).",
       "period": "2022-01-01~2026-04-23",
       "final_usd_from_100": 4442,
@@ -43,6 +43,21 @@
       "profit_factor": 1.12,
       "trades": 313,
       "notes": "단독 수익 작지만 v16과 무상관(-0.06)이 가치. 추세 on/off 스위치 구조적 기각."
+    },
+    "merged_noblock_sleeve": {
+      "config": "config/merged_noblock_sleeve.yaml",
+      "status": "champion (2026-06-09 채택: 무차단 50:50, live_trade 기본값. 배포대기)",
+      "desc": "무차단+슬리브 50:50: merged에서 시간차단(funding3) 전체 제거, size_bonus·슬리브 유지. funding3가 풀샘플서 무차단에 짐(funding3_robust 검증) 후속 채택. ⚠️ daily DD stop off + MDD봉 -61%(funding3 -49.7보다 깊음).",
+      "period": "2022-01-01~2026-04-23",
+      "final_usd_from_100": 6079,
+      "sharpe": 1.659,
+      "calmar": 2.61,
+      "mdd_bar_pct": -61.0,
+      "mdd_daily_pct": -60.1,
+      "win_rate_pct": 47.1,
+      "profit_factor": 1.57,
+      "trades": 940,
+      "notes": "vs merged_v16_sleeve_5050(funding3): 수익 +37%($6,079 vs $4,442)지만 MDD 봉 -61 vs -49.7 / 일별 -60.1 vs -45 (11~15pp 더 깊음), Sharpe 소폭↓(1.66 vs 1.69). → 병합에선 funding3가 MDD를 실질 완충(-61→-49.7), 대가는 수익. v16 단독에선 무차단이 Sharpe/수익 우위였으나(funding3_robust: 무차단 Sh1.71>funding3 1.67) 슬리브 병합에선 역전 — funding3의 가치는 수익이 아니라 MDD 완충. 대출시드엔 funding3(현 라이브) 우위."
     }
   }
 }

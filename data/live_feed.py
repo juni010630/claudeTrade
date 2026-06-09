@@ -129,13 +129,19 @@ class LiveFeed:
                     logger.warning("빈 데이터: %s %s — skip", sym, tf)
                     bars[sym][tf] = df.reset_index() if not df.empty else df
                     continue
-                # 현재 미완성 봉(마지막) 제외하고 lookback 개만 사용
-                closed = df.iloc[:-1].iloc[-self.lookback:]
+                # 마지막 봉이 아직 미완성(close time이 미래)일 때만 제외.
+                # 경계 직후(HH:00:0X) fetch 시 거래소가 forming 봉을 아직 안 주면 df의
+                # 마지막은 '직전 완성봉'이므로 무조건 떨구면 snapshot이 1h stale이 됨
+                # (봉 #N 타임스탬프가 1시간 밀려 슬리브 hour==0 게이트가 안 열림). 완성봉이면 유지.
+                tf_mins = self.TF_MINS.get(tf, 60)
+                last_close = df.index[-1] + pd.Timedelta(minutes=tf_mins)
+                if last_close > pd.Timestamp.now(tz="UTC") + pd.Timedelta(seconds=30):
+                    df = df.iloc[:-1]  # forming 봉만 제외 (30s = 시계오차 여유)
+                closed = df.iloc[-self.lookback:]
                 bars[sym][tf] = closed.reset_index()
                 # primary_tf 기준으로 실제 타임스탬프 결정
                 if tf == self.primary_tf and snap_ts is None and not closed.empty:
-                    tf_mins = self.TF_MINS.get(self.primary_tf, 60)
-                    snap_ts = closed.index[-1] + pd.Timedelta(minutes=tf_mins)
+                    snap_ts = closed.index[-1] + pd.Timedelta(minutes=self.TF_MINS.get(self.primary_tf, 60))
             funding[sym] = self._fetch_funding(sym)
             time.sleep(self.exchange.rateLimit / 1000 * 0.5)
 

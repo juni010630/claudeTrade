@@ -57,7 +57,7 @@ logging.basicConfig(
 logger = logging.getLogger("live_trade")
 
 # ── 기본 파라미터 파일 ────────────────────────────────────────────
-DEFAULT_PARAMS = "config/final_v13_eth.yaml"
+DEFAULT_PARAMS = "config/merged_noblock_sleeve.yaml"  # 채택 2026-06-09: 무차단+슬리브 50:50
 
 
 # ── ccxt Exchange 생성 ────────────────────────────────────────────
