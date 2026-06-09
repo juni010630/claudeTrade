@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 data/cache/
 data/state.json
+data/*.parquet
+data/results/
+models/
 *.log
 live_trade.log*
 trades.csv
