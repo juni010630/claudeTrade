@@ -317,11 +317,14 @@ def main() -> None:
             slips = [slippage_bps(l, r) for l, r in matched]
             med, mx = float(np.median(slips)), float(max(slips, key=abs))
             note = ""
-            if abs(med) > SLIP_MED_WARN_BPS or abs(mx) > SLIP_MAX_WARN_BPS:
+            # 중앙값 기준은 표본 5건부터 (n=2로 매일 같은 WARN 반복 = 경보 피로 방지).
+            # 단건 50bps 초과는 즉시 발동.
+            if ((len(slips) >= 5 and abs(med) > SLIP_MED_WARN_BPS)
+                    or abs(mx) > SLIP_MAX_WARN_BPS):
                 severity = "WARN" if severity == "OK" else severity
                 note = " ⚠️"
-            lines.append(f"② 진입 슬리피지: 중앙값 {med:+.1f}bps / 최대 {mx:+.1f}bps "
-                         f"(가정 5bps){note}")
+            lines.append(f"② 진입 슬리피지(n={len(slips)}): 중앙값 {med:+.1f}bps / "
+                         f"최대 {mx:+.1f}bps (가정 5bps){note}")
 
         # ③ 엣지부패
         roll = rolling_percentiles()
