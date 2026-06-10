@@ -85,6 +85,7 @@ class TelegramNotifier:
         arrow = "🟢 LONG 진입" if direction == "long" else "🔴 SHORT 진입"
         margin = size_usd / leverage if leverage > 0 else size_usd
         equity_pct = size_usd / equity * 100 if equity > 0 else 0.0
+        margin_pct = margin / equity * 100 if equity > 0 else 0.0
 
         # TP/SL 거리 및 R:R
         if direction == "long":
@@ -99,14 +100,12 @@ class TelegramNotifier:
             f"<b>{arrow}</b>\n"
             f"종목: <code>{symbol}</code>\n"
             f"가격: <code>{fill_price:,.4f}</code>\n"
-            f"노셔널: <code>${size_usd:,.2f}</code> (자본의 {equity_pct:.1f}%)  "
-            f"레버리지: <b>x{leverage}</b>\n"
-            f"마진: <code>${margin:,.2f}</code>\n"
+            f"노셔널: 자본의 <b>{equity_pct:.1f}%</b>  "
+            f"레버리지: <b>x{leverage}</b>  마진: 자본의 {margin_pct:.1f}%\n"
             f"TP: <code>{tp_price:,.4f}</code> (+{tp_dist:.1f}%) / "
             f"SL: <code>{sl_price:,.4f}</code> (-{sl_dist:.1f}%)  "
             f"R:R <b>{rr:.2f}</b>\n"
-            f"전략: {strategy} | Tier <b>{tier}</b> (점수 {score})\n"
-            f"잔고: ${equity:,.2f}"
+            f"전략: {strategy} | Tier <b>{tier}</b> (점수 {score})"
         )
         self.send(text)
 
@@ -154,23 +153,19 @@ class TelegramNotifier:
         strat_info = f"  <i>{strategy} {tier}({score})</i>" if strategy else ""
         slip_info = ""
         if entry_slip_pct is not None:
-            slip_info = f"\n슬리피지(진입): {entry_slip_pct:+.3f}% · 수수료: ${commission:,.3f}"
+            fee_pct = commission / size_usd * 100 if size_usd > 0 else 0.0
+            slip_info = f"\n슬리피지(진입): {entry_slip_pct:+.3f}% · 수수료: {fee_pct:.3f}%"
         cum_info = ""
         if cum_trades > 0:
-            cum_info = (
-                f"\n누적: {cum_trades}건 | WR {cum_wr:.1f}% | "
-                f"PnL <b>{cum_pnl:+,.0f} USDT</b>"
-            )
+            cum_info = f"\n누적: {cum_trades}건 | WR {cum_wr:.1f}%"
 
         text = (
             f"<b>{icon} {direction.upper()} {reason_kr} [{exit_reason}]</b>\n"
             f"종목: <code>{symbol}</code> {arrow}{strat_info}\n"
             f"진입: <code>{entry_price:,.4f}</code> → "
             f"청산: <code>{exit_price:,.4f}</code> ({pct:+.2f}%)\n"
-            f"PnL: <b>{pnl:+,.2f} USDT</b>  "
-            f"(레버리지 {lev_pct:+.1f}% / 자본 {pnl_pct_equity:+.2f}%)\n"
-            f"보유: {h}h {m}m{slip_info}\n"
-            f"잔고: ${equity:,.2f}{cum_info}"
+            f"PnL: <b>자본 {pnl_pct_equity:+.2f}%</b>  (레버리지 {lev_pct:+.1f}%)\n"
+            f"보유: {h}h {m}m{slip_info}{cum_info}"
         )
         self.send(text)
 
@@ -191,9 +186,8 @@ class TelegramNotifier:
         pf_str = f"{pf:.2f}" if pf < 999 else "∞"
         text = (
             f"💓 <b>Heartbeat</b> (봉 #{bar_count})\n"
-            f"자산: <b>${equity:,.2f}</b>  ({total_pct:+.1f}%)\n"
+            f"자산: 시작 대비 <b>{total_pct:+.1f}%</b>\n"
             f"누적: {trades}건 | WR {wr_pct:.1f}% | PF {pf_str}\n"
-            f"총손익: <b>{cum_pnl:+,.2f} USDT</b>\n"
             f"포지션: {positions}개 오픈"
         )
         self.send(text)

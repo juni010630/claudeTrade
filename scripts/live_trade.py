@@ -425,13 +425,11 @@ def main() -> None:
         if dry_run:
             mode += " | DRY-RUN"
         strats = [s.name for s in engine.strategies]
-        balance_str = f"${usdt:,.2f}" if usdt is not None else "N/A"
         notifier.notify_info(
             f"🚀 <b>봇 시작</b>\n"
             f"모드: {mode}\n"
             f"심볼: {', '.join(symbols)}\n"
-            f"전략: {', '.join(strats)}\n"
-            f"잔고: {balance_str}"
+            f"전략: {', '.join(strats)}"
         )
 
     # ── SL 폴러 (testnet 전용, 5분 간격) + engine 접근 직렬화용 lock ──
@@ -534,19 +532,21 @@ def main() -> None:
                     if state.open_position_count > 0:
                         pos_lines = []
                         for sym, pos in state.positions.items():
+                            _upnl_pct = (pos.unrealized_pnl / state.equity * 100
+                                         if state.equity > 0 else 0.0)
                             pos_lines.append(
                                 f"  {sym} {pos.direction} 진입 {pos.entry_price:,.4f} | "
-                                f"PnL ${pos.unrealized_pnl:+,.2f} x{pos.leverage}"
+                                f"PnL 자본 {_upnl_pct:+.2f}% x{pos.leverage}"
                             )
                         notifier.notify_info(
                             f"📊 {header}\n"
-                            f"잔고: ${state.equity:,.2f} | DD: {state.daily_pnl_pct*100:+.1f}%\n"
+                            f"일중 DD: {state.daily_pnl_pct*100:+.1f}%\n"
                             f"포지션: {state.open_position_count}개\n" + "\n".join(pos_lines)
                         )
                     else:
                         notifier.notify_info(
                             f"✅ 잘 돌아감 | {header}\n"
-                            f"잔고: ${state.equity:,.2f} | 포지션 0 | DD: {state.daily_pnl_pct*100:+.1f}%"
+                            f"포지션 0 | 일중 DD: {state.daily_pnl_pct*100:+.1f}%"
                         )
 
                 # 잔고 대조 (10봉마다) — 예측 장부 vs 실제 잔고 괴리 측정·원인분해·경보·안전동기화
@@ -638,7 +638,6 @@ def main() -> None:
             msg = (
                 f"{shutdown_emoji} <b>봇 종료</b>\n"
                 f"사유: {shutdown_reason}\n"
-                f"잔고: ${state.equity:,.2f}\n"
                 f"포지션: {state.open_position_count}개\n"
                 f"누적 거래: {len(trades)}건\n"
                 f"총수익: {report.total_return_pct:+.1f}%"
