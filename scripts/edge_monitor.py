@@ -145,7 +145,10 @@ def run_replay(p: dict):
         lookback=p.get("data", {}).get("lookback_bars", 300),
     )
     engine = rb.build_engine(p, ANCHOR_CAPITAL)
-    engine.run(loader.iterate(since=ANCHOR))
+    # loader.iterate의 since는 봉 open 기준, 스냅샷 timestamp는 close 기준(open+1h).
+    # 라이브가 ANCHOR 정각에 처리한 스냅샷(= open ANCHOR-1h 봉)을 포함하려면 1h 앞당김.
+    primary_delta = pd.Timedelta(p.get("primary_timeframe", "1h"))
+    engine.run(loader.iterate(since=ANCHOR - primary_delta))
     return engine
 
 
