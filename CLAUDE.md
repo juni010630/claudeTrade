@@ -209,6 +209,7 @@ ema 8/21, multi BB 25/2.2σ/vol 1.8x. 유일한 변경 = multi SL 2.1 (v16).
 - `execution/sl_poller.py` — 테스트넷 SL 폴링 (STOP_MARKET 미지원 대체)
 - `scripts/live_trade.py` — 1h 라이브 트레이딩 러너
 - `scripts/live_validation.py` — 5m 검증용 러너
+- `scripts/edge_monitor.py` — 엣지부패 모니터 (서버 systemd timer 매일 00:30 UTC). 앵커부터 전체 리플레이 vs 라이브 대조(신호 패리티/슬리피지/30·90d 백분위). 경보만, 자동 행동 없음. **config 재배포 시 ANCHOR/ANCHOR_CAPITAL 갱신 + `edge_baseline_gen.py` 재실행 필수**
 
 ### 설정 파일
 - `config/final_v13_eth.yaml` — **최종 전략 설정** (현재 라이브 운영)
