@@ -54,6 +54,7 @@ class BacktestEngine:
         position_sizer: PositionSizer | None = None,
         strategy_leverage_tiers: dict[str, dict] | None = None,  # 전략별 레버리지 티어 오버라이드
         strategy_capital_fraction: dict[str, float] | None = None,  # 전략별 사이징 기준자본 비율(단일계좌 분할)
+        sizing_pools: dict | None = None,  # 가상 서브계좌: {enabled, rebalance, pools:{name:{strategies,fraction}}}
         broker: BacktestBroker | None = None,
         funding_simulator: FundingRateSimulator | None = None,
         price_tf: str = "1h",           # MTM/TP-SL 가격 참조 타임프레임
@@ -121,6 +122,15 @@ class BacktestEngine:
                 max_notional_usd=self.sizer.max_notional_usd,
             )
         self._strategy_capital_fraction: dict[str, float] = strategy_capital_fraction or {}
+        # 사이징 풀: 풀별 가상 equity로 사이징, 월 경계마다 목표 비중으로 가상 재분배
+        self._pool_map: dict[str, str] = {}
+        self._pool_fractions: dict[str, float] = {}
+        if sizing_pools and sizing_pools.get("enabled"):
+            for _pl, _pcfg in (sizing_pools.get("pools") or {}).items():
+                self._pool_fractions[_pl] = float(_pcfg.get("fraction", 0.5))
+                for _st in _pcfg.get("strategies", []):
+                    self._pool_map[_st] = _pl
+        self._last_rebal_month: tuple[int, int] | None = None
         self.broker = broker or BacktestBroker()
         self.funding_sim = funding_simulator or FundingRateSimulator()
         self._commission = self.broker.commission
@@ -204,7 +214,9 @@ class BacktestEngine:
         self.ledger = Ledger(csv_path=trade_log_path)
         self.equity_curve = EquityCurve()
         self.notifier = notifier
-        self.tracker = PortfolioTracker(initial_capital, self.ledger, notifier=notifier)
+        self.tracker = PortfolioTracker(initial_capital, self.ledger, notifier=notifier,
+                                        pool_map=self._pool_map or None,
+                                        pool_fractions=self._pool_fractions or None)
 
         self._last_day: pd.Timestamp | None = None
         self._last_dd_alert: DrawdownAction | None = None
@@ -489,6 +501,18 @@ class BacktestEngine:
                 self._record_equity(now, prices)
                 return  # 파산 → 신규 진입 없이 종료
 
+        # 사이징 풀 월간 리밸: 월 경계 첫 봉에서 총 equity를 목표 비중으로 가상 재분배.
+        # 복원/최초 가동으로 pool_cash가 비어 있으면 현재 equity 기준 초기화 (look-ahead 없음).
+        if self._pool_fractions:
+            if self.tracker.state.pool_cash is None:
+                self.tracker.init_pools()
+            _m = (now.year, now.month)
+            if self._last_rebal_month is None:
+                self._last_rebal_month = _m
+            elif _m != self._last_rebal_month:
+                self.tracker.rebalance_pools()
+                self._last_rebal_month = _m
+
         state = self.tracker.snapshot()
 
         # 3. 드로다운 체크
@@ -576,8 +600,12 @@ class BacktestEngine:
 
             tier = LeverageTier(cand["tier"])
             # 전략별 사이저/기준자본 (단일계좌 분할). 오버라이드 없으면 글로벌 사이저·전액.
+            # 사이징 풀 활성 시: 풀 가상 equity가 기준자본 (월간 리밸 사이 독립 복리)
             _sizer = self._strategy_sizers.get(cand["strategy"], self.sizer)
-            _cap_base = state.equity * self._strategy_capital_fraction.get(cand["strategy"], 1.0)
+            if self._pool_map and cand["strategy"] in self._pool_map:
+                _cap_base = max(0.0, self.tracker.pool_equity(self._pool_map[cand["strategy"]]))
+            else:
+                _cap_base = state.equity * self._strategy_capital_fraction.get(cand["strategy"], 1.0)
             size_usd, leverage = _sizer.calculate(
                 tier, _cap_base, cand["entry_price"], cand["sl_price"]
             )

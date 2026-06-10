@@ -40,6 +40,7 @@ class PortfolioState:
     positions: dict[str, Position] = field(default_factory=dict)  # key: symbol
     daily_start_equity: float = 0.0
     timestamp: pd.Timestamp = field(default_factory=pd.Timestamp.now)
+    pool_cash: dict[str, float] | None = None  # 사이징 풀별 가상 cash (None=풀 비활성)
 
     @property
     def daily_pnl_pct(self) -> float:

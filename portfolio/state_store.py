@@ -59,6 +59,12 @@ def save(state: PortfolioState, path: Path = DEFAULT_PATH, engine=None) -> None:
             data["guards"] = guards.to_state()
         # 딥플로어 피크 — 재기동 시 피크가 현재 잔고로 리셋되면 플로어가 느슨해짐
         data["peak_equity"] = getattr(engine, "_peak_equity", None)
+        # 사이징 풀 — 풀별 가상 cash + 마지막 리밸 월 (재기동 시 풀 스케일/리밸 시점 보존)
+        if state.pool_cash is not None:
+            data["pool_cash"] = state.pool_cash
+        lrm = getattr(engine, "_last_rebal_month", None)
+        if lrm is not None:
+            data["last_rebal_month"] = list(lrm)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     tmp.replace(path)
@@ -103,6 +109,7 @@ def load(path: Path = DEFAULT_PATH) -> PortfolioState | None:
         daily_start_equity=data.get("daily_start_equity", data["equity"]),
         positions=positions,
     )
+    state.pool_cash = data.get("pool_cash")
     saved_at = data.get("saved_at", "?")
     logger.info("state 복원: equity=%.2f, positions=%d, saved=%s",
                 state.equity, len(positions), saved_at)
@@ -141,3 +148,8 @@ def restore_runtime(engine, path: Path = DEFAULT_PATH) -> None:
     if pk is not None and hasattr(engine, "_peak_equity"):
         engine._peak_equity = max(engine._peak_equity, float(pk))
         logger.info("딥플로어 피크 복원: %.2f", engine._peak_equity)
+    # 사이징 풀 마지막 리밸 월 복원 (재기동이 월간 리밸를 중복/누락시키지 않게)
+    lrm = data.get("last_rebal_month")
+    if lrm and hasattr(engine, "_last_rebal_month"):
+        engine._last_rebal_month = (int(lrm[0]), int(lrm[1]))
+        logger.info("사이징 풀 리밸 월 복원: %s", engine._last_rebal_month)

@@ -14,7 +14,9 @@ from risk.models import PortfolioState, Position
 
 
 class PortfolioTracker:
-    def __init__(self, initial_capital: float, ledger: Ledger, notifier=None) -> None:
+    def __init__(self, initial_capital: float, ledger: Ledger, notifier=None,
+                 pool_map: dict[str, str] | None = None,
+                 pool_fractions: dict[str, float] | None = None) -> None:
         self.ledger = ledger
         self.state = PortfolioState(
             equity=initial_capital,
@@ -22,6 +24,48 @@ class PortfolioTracker:
             daily_start_equity=initial_capital,
         )
         self.notifier = notifier
+        # 사이징 풀(가상 서브계좌): strategy→pool 매핑 + 풀별 목표 비중
+        self._pool_map = pool_map or {}
+        self._pool_fractions = pool_fractions or {}
+        if self._pool_fractions:
+            self.state.pool_cash = {pl: initial_capital * fr
+                                    for pl, fr in self._pool_fractions.items()}
+
+    def _pool_add(self, strategy: str, amount: float) -> None:
+        """현금 흐름을 해당 전략의 풀 cash에 미러링 (풀 비활성 시 no-op)."""
+        pc = self.state.pool_cash
+        if pc is None:
+            return
+        pool = self._pool_map.get(strategy)
+        if pool in pc:
+            pc[pool] += amount
+
+    def pool_equity(self, pool: str) -> float:
+        """풀 가상 equity = 풀 cash + 풀 소속 포지션 미실현 PnL."""
+        pc = self.state.pool_cash
+        if pc is None or pool not in pc:
+            return self.state.equity
+        unreal = sum(p.unrealized_pnl for p in self.state.positions.values()
+                     if self._pool_map.get(p.strategy) == pool)
+        return pc[pool] + unreal
+
+    def init_pools(self) -> None:
+        """현재 총 equity를 목표 비중으로 분할해 풀 cash 초기화 (복원/최초 가동용)."""
+        if not self._pool_fractions:
+            return
+        self.state.pool_cash = {}
+        for pl, fr in self._pool_fractions.items():
+            unreal = sum(p.unrealized_pnl for p in self.state.positions.values()
+                         if self._pool_map.get(p.strategy) == pl)
+            self.state.pool_cash[pl] = self.state.equity * fr - unreal
+
+    def rebalance_pools(self) -> None:
+        """총 equity를 목표 비중으로 가상 재분배 (강제청산 없음, cash 이전만)."""
+        if self.state.pool_cash is None:
+            return
+        for pl, fr in self._pool_fractions.items():
+            target = self.state.equity * fr
+            self.state.pool_cash[pl] += target - self.pool_equity(pl)
 
     def apply_fill(self, fill: Fill) -> None:
         """진입 Fill → 포지션 오픈."""
@@ -45,6 +89,7 @@ class PortfolioTracker:
         )
         self.state.positions[order.symbol] = pos
         self.state.cash -= fill.total_cost  # 진입 수수료+슬리피지 즉시 차감
+        self._pool_add(order.strategy, -fill.total_cost)
         logger.info(
             "ENTRY %s %s %dx | price=%.4f size=$%.2f | TP=%.4f SL=%.4f | score=%d",
             order.symbol, order.direction, order.leverage,
@@ -76,6 +121,7 @@ class PortfolioTracker:
         # 펀딩(funding_paid)은 apply_funding에서 이미 차감됨 → 여기선 exit 비용만 반영.
         exit_cost = commission + slippage_cost
         self.state.cash += raw_pnl - exit_cost
+        self._pool_add(pos.strategy, raw_pnl - exit_cost)
 
         # ledger용 realized_pnl: 전체 비용(진입+청산+펀딩) 모두 포함
         realized_pnl = raw_pnl - pos.entry_commission - pos.entry_slippage - exit_cost - pos.funding_paid
@@ -173,6 +219,7 @@ class PortfolioTracker:
         pos.entry_slippage += slippage_cost
         pos.adds_done += 1
         self.state.cash -= commission + slippage_cost
+        self._pool_add(pos.strategy, -(commission + slippage_cost))
         logger.info(
             "PYRAMID %s %s | add $%.2f @ %.4f → size $%.2f avg %.4f",
             symbol, pos.direction, add_size_usd, add_price,
@@ -185,6 +232,7 @@ class PortfolioTracker:
                 continue  # 포지션 없는 심볼은 무시 (방어)
             self.state.positions[sym].funding_paid += cost
             self.state.cash -= cost
+            self._pool_add(self.state.positions[sym].strategy, -cost)
 
     def mark_to_market(self, prices: dict[str, float]) -> None:
         total_unrealized = 0.0

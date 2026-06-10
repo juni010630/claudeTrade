@@ -168,6 +168,7 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         ),
         strategy_leverage_tiers=p.get("strategy_leverage_tiers"),
         strategy_capital_fraction=p.get("strategy_capital_fraction"),
+        sizing_pools=p.get("sizing_pools"),
         broker=broker,
         funding_simulator=FundingRateSimulator(
             interval_hours=e.get("funding_interval_hours", 8),
