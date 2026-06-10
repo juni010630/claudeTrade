@@ -1,0 +1,9 @@
+[Unit]
+Description=Edge decay monitor (daily live vs backtest replay)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/claudeTrade
+ExecStart=/home/ubuntu/claudeTrade/venv/bin/python3 scripts/edge_monitor.py
