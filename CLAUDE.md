@@ -110,6 +110,22 @@ ema 8/21, multi BB 25/2.2σ/vol 1.8x. 유일한 변경 = multi SL 2.1 (v16).
 - **슬리브 심볼확장 3차 기각** (`SLEEVE_EXPANSION_RESULTS.md`) — 79후보 중 72개 현역 미달, IS 상위5 추가가 IS에서조차 MDD -42→-60. 영구 종결
 - **킬스위치 구현**: `scripts/emergency_stop.py` — 봇 정지 후 독립 실행, dry-run 기본/`--yes` 실집행, 텔레그램 기록. **수기 청산 대신 이 절차 사용**
 
+### 2026-06-10 수익률 6축 프로그램 — 비용=생존레버 발견, 전략내부 레버 소진
+게이트: Sharpe 비열위 + MDD봉 -45% 이내 (상세 = 각 repo MD):
+- ⚠️ **슬리피지 스트레스 (`COST_REALITY.md`) — 최대 발견:** 15bps만 돼도 2023이 +9%→-47% 붕괴,
+  **딥플로어 -55% 발동 = 봇 사망.** OOS(2025~)는 35bps도 생존(Sh2.42). 실측 23~36bps 유지 시
+  2023형 횡보장 재림 = 실계좌 파산 존. **비용 절감 = 생존 레버. 백테 인용 시 "5bps 가정" 명기.**
+- **maker-first 진입 타당 (`MAKER_ENTRY_STUDY.md`):** 시그널 close 지정가+5분 폴백 → 체결률 91~98%,
+  순절감 +6~35bps/노셔널. 역선택 실재하나 미체결 2~9%뿐. **라이브 미반영 (구현 결정 대기)**
+- **피라미딩 v17 기각 (`PYRAMID_V17_RESULTS.md`):** v13 +66% → v17 **-12% 역전**(sd4 슬롯경쟁).
+  5m 교차 완전일치로 방법론 깨끗. 축 종결
+- **사이징 풀 구현·활성화 기각 (`SIZING_POOLS_RESULTS.md`):** `sizing_pools` config(기본 off) 양쪽
+  배선+state.json 영속, **off 패리티 비트동일**. ON(월간리밸)=수익+22%/MDD-45.1%(0.1pp 초과) 기각.
+  정적 55:45($11,589/-44.8/Sh1.912)가 더 단순하게 거의 지배 — 월간리밸 실체=리스크 다이얼
+- **캐리 폐기 (`CARRY_YIELD_STUDY.md`):** 상시 연 ~5%(판단선 10% 미달), 동적 -27%/yr 참사. 시장중립 완전 종결
+- **OI/테이커비율 중단:** 바이낸스 API ~30일 히스토리뿐(2022 startTime invalid) → 검증 불가
+- **남은 수익 레버 = ①집행 개선(maker-first) ②배분 다이얼 55:45(OOS 미검증, 사용자 결정)**
+
 ### 2026-06-09 코드 리뷰 + 라이브 버그/배포
 - **전체 코드 리뷰:** 코어 깨끗(look-ahead 없음, 백테=라이브 패리티 배선 OK, 트래커/브로커 회계 정확). 잔여 우려: daily DD off, 슬리브가 추세 scorer로 게이팅(score≥3 통과해야 진입), capital_fraction은 노출격리 아님(cross margin 공유).
 - **라이브 피드 1h stale 버그 발견·수정 (commit 6aa0d0b, [[project_live_feed_stale_bug]]):** 봉경계 +1초 fetch가 직전 완성봉을 미완성으로 오인해 drop → snapshot 매 봉 1h stale, 슬리브 hour==0 미발동(=원격서 슬리브 미진입 원인). `last_close > now+30s일 때만 drop`으로 수정. 원격서 01:00 봉 timestamp 정상 확인.
