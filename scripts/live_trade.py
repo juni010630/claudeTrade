@@ -206,6 +206,7 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         ),
         strategy_leverage_tiers=p.get("strategy_leverage_tiers"),
         strategy_capital_fraction=p.get("strategy_capital_fraction"),
+        sizing_pools=p.get("sizing_pools"),
         broker=broker,
         funding_simulator=FundingRateSimulator(
             interval_hours=e.get("funding_interval_hours", 8)
@@ -319,12 +320,15 @@ def main() -> None:
     # Exchange + Broker 생성 (수수료/슬리피지는 백테스트와 동일하게 config 값 사용)
     exec_cfg = params.get("execution", {})
     exchange = build_exchange(demo=demo)
+    mk_cfg = exec_cfg.get("maker_entry", {}) or {}
     broker   = LiveBroker(
         exchange, dry_run=dry_run, notifier=notifier,
         commission_maker=exec_cfg.get("commission_maker", 0.0002),
         commission_taker=exec_cfg.get("commission_taker", 0.0005),
         slippage_bps=exec_cfg.get("default_slippage_bps", 5.0),
         demo=demo,  # testnet=SL -4120 정상(sl_poller 대체)/메인넷=SL 재시도+경보 구분
+        maker_timeout_sec=(float(mk_cfg.get("timeout_sec", 300)) if mk_cfg.get("enabled") else 0.0),
+        maker_poll_sec=float(mk_cfg.get("poll_sec", 3)),
     )
 
     # 잔고 확인 (엔진 초기 자본으로 사용)
@@ -379,6 +383,9 @@ def main() -> None:
             # cash가 실잔고로 재앵커링됨(실잔고엔 이미 정산 펀딩 반영) → 현재 펀딩 버킷을
             # '정산됨'으로 표시해 첫 봉에서 같은 버킷 펀딩 중복부과 방지
             engine.funding_sim.sync_to(pd.Timestamp.now(tz="UTC"))
+            # 사이징 풀 복원 — 저장본 없으면 첫 봉에서 현재 equity 비례 재초기화
+            if engine.tracker._pool_fractions:
+                engine.tracker.state.pool_cash = saved.pool_cash
             logger.info("state 복원 완료: %d 포지션, cash=%.2f (거래소 잔고), daily_start=%.2f",
                         restored, engine.tracker.state.cash, saved.daily_start_equity)
         else:

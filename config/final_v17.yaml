@@ -15,6 +15,10 @@ execution:
   commission_taker: 0.0005
   default_slippage_bps: 5.0
   funding_interval_hours: 8
+  maker_entry:  # 라이브 집행 전용 (시그널/사이징 불변, 백테 무영향). 폴백 필수 — MAKER_ENTRY_STUDY.md
+    enabled: true
+    timeout_sec: 300
+    poll_sec: 3
 leverage_tiers:
   A:
     leverage: 10

@@ -38,6 +38,8 @@ class LiveBroker:
         commission_taker: float = 0.0005,
         slippage_bps: float = 5.0,
         demo: bool = False,
+        maker_timeout_sec: float = 0.0,  # >0 = maker-first 진입 (지정가 → timeout 후 시장가 추격)
+        maker_poll_sec: float = 3.0,
     ) -> None:
         self.exchange = exchange
         self.dry_run = dry_run
@@ -53,6 +55,8 @@ class LiveBroker:
         self.slippage   = SlippageModel(default_bps=slippage_bps)
         self.notifier = notifier
         self.equity_provider = equity_provider  # callable -> float (현재 자본)
+        self._maker_timeout = float(maker_timeout_sec)
+        self._maker_poll = float(maker_poll_sec)
 
     # ── 레버리지 설정 (중복 호출 방지) ──────────────────────────────
     def _ensure_leverage(self, symbol: str, leverage: int) -> None:
@@ -145,6 +149,87 @@ class LiveBroker:
         except Exception as e:
             logger.warning("SL 실패 경보 전송 실패: %s", e)
 
+    # ── maker-first 진입 (post-only 지정가 + 타임아웃 + 시장가 추격) ────
+    def _try_maker_entry(self, symbol: str, side: str, qty: float, limit_price: float):
+        """시그널가 post-only 지정가 → timeout 내 미체결 잔량 시장가 추격.
+
+        경로 시뮬 검증(MAKER_ENTRY_STUDY.md): 폴백 없이 놓치면 러너 9% 유실 = 참사.
+        → 모든 분기에서 '체결 보장 or 명시적 스킵'. 어떤 오류든 최악 = 기존 시장가 경로.
+
+        반환: {"average", "qty">0} = 체결 완료(부분 포함, 가중평균가)
+              {"average", "qty": 0} = 상태 확인 불가 → 호출자가 이번 진입 스킵
+              None = 0체결 확인 → 호출자가 기존 시장가 경로 실행
+        """
+        try:
+            px = self.exchange.price_to_precision(symbol, limit_price)
+            o = self.exchange.create_order(symbol, "limit", side, qty, px, {"postOnly": True})
+            oid = o["id"]
+            logger.info("maker 지정가 등록: %s %s qty=%s @%s (timeout %.0fs)",
+                        symbol, side, qty, px, self._maker_timeout)
+        except Exception as e:
+            # postOnly 즉시체결 거부(가격이 유리한 쪽으로 이미 관통) 포함 — 시장가가 정답
+            logger.info("maker 등록 불가 → 시장가 폴백: %s — %s: %s", symbol, type(e).__name__, e)
+            return None
+
+        def _status():
+            o2 = self.exchange.fetch_order(oid, symbol)
+            return (o2.get("status"), float(o2.get("filled") or 0.0),
+                    float(o2.get("average") or limit_price))
+
+        deadline = time.time() + self._maker_timeout
+        try:
+            while time.time() < deadline:
+                time.sleep(self._maker_poll)
+                status, filled, avg = _status()
+                if status == "closed" or filled >= qty * 0.999:
+                    logger.info("maker 전량 체결: %s @%.6g", symbol, avg)
+                    return {"average": avg, "qty": filled if filled > 0 else qty}
+                if status in ("canceled", "expired", "rejected"):
+                    return {"average": avg, "qty": filled} if filled > 0 else None
+
+            # 타임아웃 → 취소. 취소-체결 레이스는 취소 후 재조회가 진실.
+            try:
+                self.exchange.cancel_order(oid, symbol)
+            except Exception as e:
+                logger.info("maker 취소 응답(이미 체결/취소 가능): %s", e)
+            status, filled, avg = _status()
+            if status == "closed" or filled >= qty * 0.999:
+                logger.info("maker 취소 직전 전량 체결: %s @%.6g", symbol, avg)
+                return {"average": avg, "qty": filled if filled > 0 else qty}
+
+            remain = qty - filled
+            try:
+                remain_p = float(self.exchange.amount_to_precision(symbol, remain))
+            except Exception:
+                remain_p = round(remain, 6)
+            if remain_p <= 0:
+                return {"average": avg, "qty": filled} if filled > 0 else None
+            res = self.exchange.create_order(symbol, "market", side, remain_p)
+            mkt_px = float(res.get("average") or res.get("price") or limit_price)
+            mkt_qty = float(res.get("filled") or remain_p)
+            total = filled + mkt_qty
+            wavg = (avg * filled + mkt_px * mkt_qty) / total if total > 0 else mkt_px
+            logger.info("maker 타임아웃 → 시장가 추격: %s maker %.6f@%.6g + market %.6f@%.6g",
+                        symbol, filled, avg, mkt_qty, mkt_px)
+            return {"average": wavg, "qty": total}
+        except Exception as e:
+            # 미지 상태 — 이중 주문 방지 최우선: 잔여 지정가 정리 후 체결분만 보고.
+            # (진입 시점엔 이 심볼의 열린 주문 = 방금 그 지정가뿐이라 cancel_all 안전)
+            logger.error("maker 경로 오류 %s — 정리 시도: %s: %s", symbol, type(e).__name__, e)
+            try:
+                self.exchange.cancel_all_orders(symbol)
+            except Exception:
+                pass
+            for _ in range(3):
+                try:
+                    status, filled, avg = _status()
+                    if filled > 0:
+                        return {"average": avg, "qty": filled}
+                    return None  # 0체결 확인 → 시장가 폴백 안전
+                except Exception:
+                    time.sleep(1)
+            return {"average": limit_price, "qty": 0.0}  # 확인 불가 → 진입 스킵
+
     # ── 메인: 주문 실행 ──────────────────────────────────────────────
     def submit(self, order: Order, current_bar: Optional[pd.Series] = None) -> Fill:
         """
@@ -194,34 +279,45 @@ class LiveBroker:
             self._notify_entry(order, price)
             return fill
 
-        # 실제 시장가 주문 (재시도 포함, 이중 주문 방지)
+        # maker-first 진입 (활성 시): 어떤 결과든 안전 — None이면 아래 기존 시장가 경로
         result = None
-        for _attempt in range(3):
-            try:
-                result = self.exchange.create_order(symbol, "market", side, qty)
-                break
-            except ccxt.InsufficientFunds as e:
-                logger.error("잔고 부족: %s", e)
-                raise
-            except ccxt.RateLimitExceeded as e:
-                logger.warning("Rate limit, 재시도 %d/3: %s", _attempt + 1, e)
-                time.sleep(2 ** _attempt)
-            except ccxt.NetworkError as e:
-                logger.warning("네트워크 오류, 재시도 %d/3: %s", _attempt + 1, e)
-                # 이미 체결됐을 수 있으므로 포지션 확인
+        if self._maker_timeout > 0:
+            mk = self._try_maker_entry(symbol, side, float(qty), float(price))
+            if mk is not None:
+                if mk["qty"] <= 0:
+                    # 상태 확인 불가 — 이중 주문 위험이라 이번 진입 스킵 (다음 봉 sync가 정리)
+                    raise ccxt.NetworkError(f"maker 진입 상태 불확실: {symbol} — 진입 스킵")
+                result = {"average": mk["average"]}
+                final_qty = float(mk["qty"])
+
+        # 시장가 주문 (재시도 포함, 이중 주문 방지)
+        if result is None:
+            for _attempt in range(3):
                 try:
-                    if symbol in self.fetch_open_symbols():
-                        logger.info("네트워크 오류지만 포지션 존재 확인 — 체결된 것으로 간주: %s", symbol)
-                        trades = self.exchange.fetch_my_trades(symbol, limit=3)
-                        if trades:
-                            result = {"average": float(trades[-1]["price"]), "fee": trades[-1].get("fee")}
-                        break
-                except Exception:
-                    pass
-                time.sleep(1)
-            except ccxt.ExchangeError as e:
-                logger.error("거래소 오류: %s", e)
-                raise
+                    result = self.exchange.create_order(symbol, "market", side, qty)
+                    break
+                except ccxt.InsufficientFunds as e:
+                    logger.error("잔고 부족: %s", e)
+                    raise
+                except ccxt.RateLimitExceeded as e:
+                    logger.warning("Rate limit, 재시도 %d/3: %s", _attempt + 1, e)
+                    time.sleep(2 ** _attempt)
+                except ccxt.NetworkError as e:
+                    logger.warning("네트워크 오류, 재시도 %d/3: %s", _attempt + 1, e)
+                    # 이미 체결됐을 수 있으므로 포지션 확인
+                    try:
+                        if symbol in self.fetch_open_symbols():
+                            logger.info("네트워크 오류지만 포지션 존재 확인 — 체결된 것으로 간주: %s", symbol)
+                            trades = self.exchange.fetch_my_trades(symbol, limit=3)
+                            if trades:
+                                result = {"average": float(trades[-1]["price"]), "fee": trades[-1].get("fee")}
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                except ccxt.ExchangeError as e:
+                    logger.error("거래소 오류: %s", e)
+                    raise
         if result is None:
             raise ccxt.NetworkError("3회 재시도 후에도 주문 실패")
 
