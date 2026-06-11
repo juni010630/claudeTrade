@@ -594,6 +594,35 @@ def main() -> None:
                                 "포지션 0 — tracker를 실제 잔고로 동기화: %.2f → %.2f (델타 %+.2f 기록됨)",
                                 expected, real_usdt, drift_abs,
                             )
+
+                        # BNB 수수료잔고 모니터 — feeBurn(BNB 결제 시 수수료 10% 할인) 사용 중.
+                        # 소진되면 경고 없이 USDT 정가 결제로 복귀하므로 저잔고 경보가 필수.
+                        try:
+                            bnb_total = float(bal.get("BNB", {}).get("total", 0) or 0)
+                            bnb_px = float(exchange.fetch_ticker("BNB/USDT")["last"])
+                            bnb_usd = bnb_total * bnb_px
+                            # 소진 추산: trades.csv 최근 30일 수수료(모델 추정치) × 0.9(BNB 결제분) → 일소비율
+                            bnb_days = None
+                            tl = Path("trades.csv")
+                            if tl.exists():
+                                _tdf = pd.read_csv(tl, usecols=["exit_time", "commission"])
+                                _cut = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=30)
+                                _exit_ts = pd.to_datetime(_tdf["exit_time"], utc=True, errors="coerce")
+                                _burn_day = float(_tdf.loc[_exit_ts >= _cut, "commission"].sum()) * 0.9 / 30
+                                if _burn_day > 0 and bnb_usd > 0:
+                                    bnb_days = bnb_usd / _burn_day
+                            logger.info(
+                                "BNB 수수료잔고: %.4f BNB ($%.2f)%s",
+                                bnb_total, bnb_usd,
+                                f" | 소진 예상 ~{bnb_days:.0f}일" if bnb_days else "",
+                            )
+                            if notifier and notifier.enabled and 0 < bnb_usd < 30:
+                                notifier.notify_info(
+                                    f"⚠️ <b>BNB 수수료잔고 부족</b>: {bnb_total:.4f} BNB (${bnb_usd:.2f})\n"
+                                    f"소진 시 할인 없이 USDT 정가 결제로 복귀 — 현물 매수 후 선물지갑 이체 필요"
+                                )
+                        except Exception as e:
+                            logger.warning("BNB 잔고 모니터 실패: %s", e)
                     except Exception as e:
                         logger.warning("잔고 대조 실패: %s", e)
 
