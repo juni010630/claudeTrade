@@ -35,9 +35,15 @@ def test_ranging_regime(ranging_ohlcv):
 
 
 def test_strategy_eligibility():
-    assert is_strategy_eligible(MarketRegime.TRENDING, "momentum_breakout")
-    assert not is_strategy_eligible(MarketRegime.RANGING, "momentum_breakout")
+    # mean_reversion/macross_d는 전체 국면 허용 — 횡보 판정은 전략 내부 게이트 담당 (regime/filters.py)
     assert is_strategy_eligible(MarketRegime.RANGING, "mean_reversion")
-    assert not is_strategy_eligible(MarketRegime.TRENDING, "mean_reversion")
+    assert is_strategy_eligible(MarketRegime.TRENDING, "mean_reversion")
+    assert is_strategy_eligible(MarketRegime.TRENDING, "macross_d")
+    assert is_strategy_eligible(MarketRegime.RANGING, "macross_d")
     assert is_strategy_eligible(MarketRegime.TRENDING, "ema_cross")
     assert is_strategy_eligible(MarketRegime.PRE_BREAKOUT, "ema_cross")
+    assert not is_strategy_eligible(MarketRegime.RANGING, "ema_cross")
+    assert is_strategy_eligible(MarketRegime.TRENDING, "multi_tf_breakout")
+    assert not is_strategy_eligible(MarketRegime.RANGING, "multi_tf_breakout")
+    # 미등록 전략은 항상 차단
+    assert not is_strategy_eligible(MarketRegime.TRENDING, "momentum_breakout")

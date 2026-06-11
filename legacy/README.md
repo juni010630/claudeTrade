@@ -6,7 +6,7 @@ v18(`config/final_v18_triple.yaml`) 라이브 기준으로 운영·백테 경로
 
 ## 구성
 - `scripts/` — 실험 스크립트 136개 (스윕/어블레이션/진단/검증 세션 산출물)
-- `config/` — 실험 config 56개 (p2~p7, test_*, uni*, adx_*, bucket_* 등)
+- `config/` — 실험 config 57개 (p2~p7, test_*, uni*, adx_*, bucket_* 등 + final_v18_triple_pools=기각된 v18b, 2026-06-12 추가)
 - `tests/` — 죽은 테스트 (`test_full_backtest.py` — 삭제된 strategies.momentum_breakout import)
 
 ## 이동 기준 (2026-06-11 검증)

@@ -139,7 +139,7 @@ ema 8/21, multi BB 25/2.2σ/vol 1.8x. 유일한 변경 = multi SL 2.1 (v16).
 - SS/S/A 티어 사용 (SS=5+, S=4, A=3 — confluence score 3점 이상)
 - **ETH regime**: ETHUSDT ADX로 시장 상태 분류 (BTC 대비 3x 수익 개선)
 
-### 이전 버전
+### 이전 버전 (두 파일 모두 소실 — repo·legacy 어디에도 없음, 서술 기록만)
 - `config/final_fixed_v2.yaml` — BTC regime, RPT 0.07, max_pos 5 (원본)
 - `config/final_aggressive_v1.json` — trailing SL 포함 (1h 성과 뻥튀기 확인 → 제거)
 
@@ -225,7 +225,7 @@ ema 8/21, multi BB 25/2.2σ/vol 1.8x. 유일한 변경 = multi SL 2.1 (v16).
 - `execution/live_broker.py` — 바이낸스 주문 전송
 - `execution/sl_poller.py` — 테스트넷 SL 폴링 (STOP_MARKET 미지원 대체)
 - `scripts/live_trade.py` — 1h 라이브 트레이딩 러너
-- `legacy/` — **일회성 실험 스크립트(136)·실험 config(56)·죽은 테스트 아카이브 (2026-06-11 정리)**. 옛 문서의 `scripts/X.py`·`config/X.yaml` 경로는 `legacy/scripts/`·`legacy/config/` 하위를 볼 것. sys.path 기준이 어긋나 제자리 실행 불가 — 재실행하려면 원위치로 복원. scripts/에 남은 12개 = 운영(live_trade, run_backtest, fetch_data, edge_monitor, edge_baseline_gen, oi_collector, emergency_stop, regime_now, trend_index_now) + 범용 유틸(run_bt_save, save_strategy, verify_replay)
+- `legacy/` — **일회성 실험 스크립트(136)·실험 config(57)·죽은 테스트 아카이브 (2026-06-11 정리)**. 옛 문서의 `scripts/X.py`·`config/X.yaml` 경로는 `legacy/scripts/`·`legacy/config/` 하위를 볼 것. sys.path 기준이 어긋나 제자리 실행 불가 — 재실행하려면 원위치로 복원. scripts/에 남은 12개 = 운영(live_trade, run_backtest, fetch_data, edge_monitor, edge_baseline_gen, oi_collector, emergency_stop, regime_now, trend_index_now) + 범용 유틸(run_bt_save, save_strategy, verify_replay)
 - `scripts/edge_monitor.py` — 엣지부패 모니터 (서버 systemd timer 매일 00:30 UTC). 앵커부터 전체 리플레이 vs 라이브 대조(신호 패리티/슬리피지/30·90d 백분위). 경보만, 자동 행동 없음. **config 재배포 시 ANCHOR/ANCHOR_CAPITAL 갱신 + `edge_baseline_gen.py` 재실행 필수**
 - `scripts/oi_collector.py` — OI/테이커비율/계좌L,S비율 일일 수집 (edge-monitor.service ExecStartPost, 서버 `data/oi_cache/`). 바이낸스 30일 한계를 자체 축적으로 우회 — **표본 1년+ 쌓인 뒤에만 신호 연구 사용** (2026-06-11 가동)
 
