@@ -1075,7 +1075,11 @@ class BacktestEngine:
             if not already_closed:
                 qty = pos.size_usd / pos.entry_price
                 try:
-                    self.broker.market_close(sym, pos.direction, qty)
+                    # timeout 청산만 maker-first (SL/TP 미스 등 긴급 경로는 시장가 즉시)
+                    self.broker.market_close(
+                        sym, pos.direction, qty,
+                        allow_maker=(exit_reason == "timeout"),
+                    )
                 except Exception as e:
                     import logging
                     logging.getLogger(__name__).error(

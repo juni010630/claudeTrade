@@ -457,8 +457,75 @@ class LiveBroker:
             logger.warning("fetch_positions 실패: %s", e)
             return set()
 
-    def market_close(self, symbol: str, direction: str, qty: float) -> None:
-        """엔진 TP/SL 히트 시 호출. 열린 TP LIMIT 주문 취소 + 시장가 청산.
+    def _try_maker_close(self, symbol: str, close_side: str, qty: float,
+                         ref_price: float) -> float:
+        """타임아웃 청산용 post-only 지정가 시도. 반환 = 미체결 잔량 추정(0=전량 체결).
+
+        reduceOnly라 어떤 레이스에서도 과청산/방향 반전이 불가 — 실패 시 최악은
+        기존 시장가 경로(호출자가 잔량을 거래소 포지션 재조회로 확정 후 시장가).
+        """
+        try:
+            px = self.exchange.price_to_precision(symbol, ref_price)
+            o = self.exchange.create_order(
+                symbol, "limit", close_side, qty, px,
+                {"postOnly": True, "reduceOnly": True},
+            )
+            oid = o["id"]
+            logger.info("maker 청산 등록: %s %s qty=%s @%s (timeout %.0fs)",
+                        symbol, close_side, qty, px, self._maker_timeout)
+        except Exception as e:
+            # postOnly 즉시체결 거부 포함 — 시장가가 정답
+            logger.info("maker 청산 등록 불가 → 시장가 폴백: %s — %s: %s",
+                        symbol, type(e).__name__, e)
+            return qty
+
+        def _status():
+            o2 = self.exchange.fetch_order(oid, symbol)
+            return o2.get("status"), float(o2.get("filled") or 0.0)
+
+        deadline = time.time() + self._maker_timeout
+        try:
+            while time.time() < deadline:
+                time.sleep(self._maker_poll)
+                status, filled = _status()
+                # 전량 판정은 status=="closed"만 인정 — filled 비율 허용치(예: 99.9%)로
+                # 판정하면 잔여 0.1% 더스트 + 살아있는 지정가가 고아로 남음 (sync는
+                # tracker쪽 고아만 정리하므로 영구 표류). 99.9% 체결·미종결이면 계속
+                # 대기 → 타임아웃 취소 경로가 잔량을 시장가로 정리.
+                if status == "closed":
+                    logger.info("maker 청산 전량 체결: %s", symbol)
+                    return 0.0
+                if status in ("canceled", "expired", "rejected"):
+                    return max(qty - filled, 0.0)
+            # 타임아웃 → 취소. 취소-체결 레이스는 취소 후 재조회가 진실.
+            try:
+                self.exchange.cancel_order(oid, symbol)
+            except Exception as e:
+                logger.info("maker 청산 취소 응답(이미 체결/취소 가능): %s", e)
+            status, filled = _status()
+            if status == "closed":
+                logger.info("maker 청산 취소 직전 전량 체결: %s", symbol)
+                return 0.0
+            logger.info("maker 청산 타임아웃: %s 체결 %.6f/%.6f → 잔량 시장가",
+                        symbol, filled, qty)
+            return max(qty - filled, 0.0)
+        except Exception as e:
+            # 미지 상태 — 잔여 지정가 정리 후 전량을 잔량으로 보고
+            # (시장가 reduceOnly는 이미 체결된 만큼 자동 캡 → 안전)
+            logger.error("maker 청산 경로 오류 %s — 시장가 폴백: %s: %s",
+                         symbol, type(e).__name__, e)
+            try:
+                self.exchange.cancel_all_orders(symbol)
+            except Exception:
+                pass
+            return qty
+
+    def market_close(self, symbol: str, direction: str, qty: float,
+                     allow_maker: bool = False) -> None:
+        """엔진 TP/SL/timeout 히트 시 호출. 열린 TP LIMIT 주문 취소 + 청산.
+
+        allow_maker=True(타임아웃 청산 한정): post-only 지정가 먼저 시도, 미체결
+        잔량은 시장가 폴백. SL/긴급 청산은 기본값 False = 기존 시장가 즉시.
 
         Raises: 청산 실패 시 Exception을 raise (고아 포지션 방지).
         """
@@ -481,6 +548,32 @@ class LiveBroker:
                     break
         except Exception:
             pass  # 조회 실패 시 전달받은 qty 사용
+        # 2.5) maker-first 청산 (타임아웃 한정) — 현재가 post-only, 잔량은 아래 시장가
+        if allow_maker and self._maker_timeout > 0:
+            remain = actual_qty
+            try:
+                ref = float(self.exchange.fetch_ticker(symbol)["last"])
+                remain = self._try_maker_close(symbol, close_side, actual_qty, ref)
+            except Exception as e:
+                logger.warning("maker 청산 시도 불가 %s: %s — 시장가 진행", symbol, e)
+            # maker 보고값과 무관하게 항상 거래소 포지션 재조회로 잔량 확정
+            # (체결 진실 = 거래소. "전량 체결" 보고를 그대로 믿고 반환하면 더스트 고아 위험)
+            try:
+                positions = self.exchange.fetch_positions([symbol])
+                actual_qty = 0.0
+                for p in positions:
+                    if float(p.get("contracts") or 0) != 0:
+                        actual_qty = abs(float(p["contracts"]))
+                        break
+                if actual_qty <= 0:
+                    logger.info("market_close 완료(maker, 잔량 0 확인): %s", symbol)
+                    return
+            except Exception:
+                if remain <= 0:
+                    # maker가 status=closed로 전량 보고 + 재조회 실패 → 완료 간주
+                    logger.info("market_close 완료(maker 전량, 재조회 실패): %s", symbol)
+                    return
+                actual_qty = remain  # 조회 실패 → 추정 잔량 (reduceOnly가 과청산 차단)
         # 3) 시장가 reduceOnly 청산
         try:
             q = self.exchange.amount_to_precision(symbol, actual_qty)
