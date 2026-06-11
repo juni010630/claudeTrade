@@ -221,20 +221,19 @@ ema 8/21, multi BB 25/2.2σ/vol 1.8x. 유일한 변경 = multi SL 2.1 (v16).
 - `engine/backtest.py` — 백테스트 + 라이브 공용 엔진 (BacktestEngine)
 - `data/loader.py` — 캐시 parquet → MarketSnapshot 이터레이터
 - `data/live_feed.py` — ccxt 실시간 피드 (5m/1h/4h/1d, freshness 검증)
-- `strategies/` — 전략 클래스 (ema_cross, multi_tf_breakout 등 13개)
+- `strategies/` — 전략 클래스 (ema_cross, multi_tf_breakout, mean_reversion, ema_slow_daily=macross_d, ml_filter)
 - `execution/live_broker.py` — 바이낸스 주문 전송
 - `execution/sl_poller.py` — 테스트넷 SL 폴링 (STOP_MARKET 미지원 대체)
 - `scripts/live_trade.py` — 1h 라이브 트레이딩 러너
-- `scripts/live_validation.py` — 5m 검증용 러너
+- `legacy/` — **일회성 실험 스크립트(136)·실험 config(56)·죽은 테스트 아카이브 (2026-06-11 정리)**. 옛 문서의 `scripts/X.py`·`config/X.yaml` 경로는 `legacy/scripts/`·`legacy/config/` 하위를 볼 것. sys.path 기준이 어긋나 제자리 실행 불가 — 재실행하려면 원위치로 복원. scripts/에 남은 12개 = 운영(live_trade, run_backtest, fetch_data, edge_monitor, edge_baseline_gen, oi_collector, emergency_stop, regime_now, trend_index_now) + 범용 유틸(run_bt_save, save_strategy, verify_replay)
 - `scripts/edge_monitor.py` — 엣지부패 모니터 (서버 systemd timer 매일 00:30 UTC). 앵커부터 전체 리플레이 vs 라이브 대조(신호 패리티/슬리피지/30·90d 백분위). 경보만, 자동 행동 없음. **config 재배포 시 ANCHOR/ANCHOR_CAPITAL 갱신 + `edge_baseline_gen.py` 재실행 필수**
 - `scripts/oi_collector.py` — OI/테이커비율/계좌L,S비율 일일 수집 (edge-monitor.service ExecStartPost, 서버 `data/oi_cache/`). 바이낸스 30일 한계를 자체 축적으로 우회 — **표본 1년+ 쌓인 뒤에만 신호 연구 사용** (2026-06-11 가동)
 
 ### 설정 파일
-- `config/final_v13_eth.yaml` — **최종 전략 설정** (현재 라이브 운영)
-- `config/final_fixed_v2.yaml` — 이전 버전 (BTC regime)
-- `config/final_aggressive_v1.json` — 이전 전략 (trailing 포함, 1h 성과 뻥튀기 확인됨)
+- `config/final_v18_triple.yaml` — **현 라이브** (트리플 40:30:30, 2026-06-11 배포)
+- `config/final_v13_eth.yaml` ~ `final_v17.yaml`, `merged_v16_sleeve.yaml` — 버전 계보 (상단 "최종 전략" 섹션 참조)
 - `config/params.yaml` — 기본 설정
-- `config/params_v2.yaml` — WF 최적화 기반 설정
+- 실험용 config는 전부 `legacy/config/`로 이동 (2026-06-11)
 
 ### 환경변수 (.env)
 ```

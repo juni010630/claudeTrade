@@ -15,7 +15,7 @@
   r2         선형회귀 R² (롤링)
   bbwpct     BB폭 트레일링 백분위
 
-검증·성분 선별 = scripts/trend_index_validate.py → TREND_INDEX_RESULTS.md.
+검증·성분 선별 = legacy/scripts/trend_index_validate.py → TREND_INDEX_RESULTS.md.
 스위칭 배선 금지 (정보용 — 2026-06-10 동적 전환 전 격자 기각).
 """
 from __future__ import annotations

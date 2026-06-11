@@ -172,7 +172,7 @@ python scripts/live_trade.py --params config/final_v13_eth.yaml --dry-run
 python scripts/verify_replay.py  # dump → replay 결과 일치 검증
 
 # 2. 리플레이 튜닝 실험 (병렬 실행)
-python scripts/tune_s_tier.py    # S 티어 사이징/차단 실험 4가지 병렬
+python legacy/scripts/tune_s_tier.py    # S 티어 사이징/차단 실험 4가지 병렬 (아카이브 — 재실행 시 scripts/로 복원)
 ```
 
 - `run_dump()` → `(MetricsReport, signals_df)`: 후보 시그널 parquet 저장

@@ -1,0 +1,405 @@
+backtest:
+  end: '2026-04-14'
+  initial_capital: 100
+  start: '2022-01-01'
+data:
+  cache_dir: data/cache
+  exchange: binanceusdm
+  lookback_bars: 300
+engine:
+  breakeven_trigger_r: null
+  max_hold_hours: 336
+  trailing_r_mult: null
+execution:
+  commission_maker: 0.0002
+  commission_taker: 0.0005
+  default_slippage_bps: 5.0
+  funding_interval_hours: 8
+  maker_entry:
+    enabled: true
+    timeout_sec: 300
+    poll_sec: 3
+leverage_tiers:
+  A:
+    leverage: 10
+    size_fraction: 0.1
+  B:
+    leverage: 1
+    size_fraction: 0.01
+  C:
+    leverage: 1
+    size_fraction: 0.01
+  S:
+    leverage: 25
+    size_fraction: 0.22
+  SS:
+    leverage: 40
+    size_fraction: 0.3
+  SSS:
+    leverage: 50
+    risk_per_trade: 0.2
+    size_fraction: 0.3
+strategy_leverage_tiers:
+  mean_reversion:
+    A:
+      leverage: 3
+      size_fraction: 0.08
+    B:
+      leverage: 3
+      size_fraction: 0.08
+    C:
+      leverage: 3
+      size_fraction: 0.08
+    S:
+      leverage: 3
+      size_fraction: 0.08
+    SS:
+      leverage: 3
+      size_fraction: 0.08
+    SSS:
+      leverage: 3
+      size_fraction: 0.08
+      risk_per_trade: 0.2
+  macross_d:
+    SSS:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    SS:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    S:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    A:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    B:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    C:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+strategy_capital_fraction:
+  ema_cross: 0.25
+  multi_tf_breakout: 0.25
+  mean_reversion: 0.25
+  macross_d: 0.5
+primary_timeframe: 1h
+regime:
+  adx_period: 14
+  adx_ranging_threshold: 12.0
+  adx_trending_threshold: 30.0
+  bb_period: 20
+  bb_std: 2.0
+  bb_width_lookback: 50
+  bb_width_squeeze_pct: 0.2
+  primary_tf: 1h
+risk:
+  circuit_breaker_pause_hours: 48
+  circuit_breaker_pause_losses: 5
+  circuit_breaker_stop_losses: 10
+  correlation_block_threshold: 0.8
+  correlation_lookback: 100
+  daily_drawdown_pause: -1.0
+  daily_drawdown_stop: -1.0
+  deep_floor_dd: -0.55
+  max_positions: 10
+  max_same_direction: 4
+  risk_per_trade: 0.07
+  tp_cooldown_hours: 6.0
+scorer:
+  daily_ema_period: 200
+  funding_long_max: 0.0003
+  funding_short_min: -0.0003
+  ml_soft_scoring:
+    enabled: false
+    model_path: models/ml_filter.pkl
+  rsi_long_max: 70.0
+  rsi_short_min: 40.0
+  tier_a_min_score: 3
+  tier_b_min_score: 99
+  tier_c_min_score: 99
+  tier_s_min_score: 4
+  tier_ss_min_score: 6
+  tier_sss_min_score: 6
+  volume_ratio_threshold: 1.8
+strategies:
+  ema_cross:
+    atr_period: 14
+    atr_sl_mult: 1.8
+    atr_tp_mult: 3.5
+    daily_ema_period: 150
+    enabled: true
+    fast_period: 8
+    filter_tf: 4h
+    macd_fast: 12
+    macd_signal: 7
+    macd_slow: 21
+    signal_tf: 1h
+    slow_period: 21
+    symbols:
+    - ETHUSDT
+    - BTCUSDT
+    - DOGEUSDT
+    - ARBUSDT
+    - FILUSDT
+    - ADAUSDT
+  multi_tf_breakout:
+    atr_period: 14
+    atr_sl_mult: 2.1
+    atr_tp_mult: 4.0
+    bb_period: 25
+    bb_std_1h: 2.2
+    bb_std_4h: 2.0
+    confirm_tf: 4h
+    daily_ema_period: 150
+    enabled: true
+    filter_tf: 1d
+    rsi_long_min: 55.0
+    rsi_period: 10
+    rsi_short_max: 45.0
+    signal_tf: 1h
+    volume_lookback: 20
+    volume_multiplier: 1.8
+    symbols:
+    - ETHUSDT
+    - BTCUSDT
+    - DOGEUSDT
+    - ARBUSDT
+    - FILUSDT
+    - ADAUSDT
+  mean_reversion:
+    atr_period: 14
+    atr_sl_mult: 2.0
+    atr_tp_mult: 3.0
+    enabled: true
+    max_adx: 99.0
+    require_bb: false
+    rsi_overbought: 70.0
+    rsi_oversold: 30.0
+    rsi_period: 14
+    signal_tf: 1d
+    use_regime_gate: false
+    symbols:
+    - LTCUSDT
+    - UNIUSDT
+    - STORJUSDT
+    - ARPAUSDT
+    - BANDUSDT
+  macross_d:
+    enabled: true
+    fast_period: 20
+    slow_period: 100
+    atr_period: 14
+    atr_tp_mult: 6.0
+    atr_sl_mult: 3.0
+    signal_tf: 1d
+    liq_min_usd: 3000000.0
+    liq_window: 30
+    symbols:
+    - 1000XECUSDT
+    - 1INCHUSDT
+    - AAVEUSDT
+    - ALGOUSDT
+    - ALICEUSDT
+    - ANKRUSDT
+    - ARPAUSDT
+    - ARUSDT
+    - ATOMUSDT
+    - AXSUSDT
+    - BANDUSDT
+    - BATUSDT
+    - BCHUSDT
+    - BELUSDT
+    - BTCDOMUSDT
+    - C98USDT
+    - CELOUSDT
+    - CELRUSDT
+    - CHRUSDT
+    - CHZUSDT
+    - COMPUSDT
+    - COTIUSDT
+    - CRVUSDT
+    - CTSIUSDT
+    - DASHUSDT
+    - DOTUSDT
+    - DYDXUSDT
+    - EGLDUSDT
+    - ENJUSDT
+    - ENSUSDT
+    - FILUSDT
+    - GALAUSDT
+    - GRTUSDT
+    - GTCUSDT
+    - HBARUSDT
+    - HOTUSDT
+    - ICXUSDT
+    - IOSTUSDT
+    - IOTAUSDT
+    - IOTXUSDT
+    - KAVAUSDT
+    - KNCUSDT
+    - KSMUSDT
+    - LPTUSDT
+    - LTCUSDT
+    - MANAUSDT
+    - MASKUSDT
+    - MTLUSDT
+    - NEOUSDT
+    - OGNUSDT
+    - ONEUSDT
+    - ONTUSDT
+    - PEOPLEUSDT
+    - QTUMUSDT
+    - RLCUSDT
+    - ROSEUSDT
+    - RSRUSDT
+    - RUNEUSDT
+    - RVNUSDT
+    - SANDUSDT
+    - SFPUSDT
+    - SKLUSDT
+    - SNXUSDT
+    - STORJUSDT
+    - SUSHIUSDT
+    - THETAUSDT
+    - TRBUSDT
+    - TRXUSDT
+    - UNIUSDT
+    - VETUSDT
+    - XLMUSDT
+    - XMRUSDT
+    - XTZUSDT
+    - YFIUSDT
+    - ZECUSDT
+    - ZENUSDT
+    - ZILUSDT
+    - ZRXUSDT
+strategy_size_bonus:
+  ema_cross:
+  - 0
+  - 5
+  - 12
+  - 15
+  - 22
+  multi_tf_breakout:
+  - 0
+  - 1
+  - 12
+  - 14
+  - 22
+strategy_size_bonus_mult: 1.25
+symbol_block_directions:
+  BTCUSDT:
+  - short
+symbols:
+- ETHUSDT
+- BTCUSDT
+- DOGEUSDT
+- ARBUSDT
+- FILUSDT
+- ADAUSDT
+- LTCUSDT
+- UNIUSDT
+- STORJUSDT
+- ARPAUSDT
+- BANDUSDT
+- 1000XECUSDT
+- 1INCHUSDT
+- AAVEUSDT
+- ALGOUSDT
+- ALICEUSDT
+- ANKRUSDT
+- ARUSDT
+- ATOMUSDT
+- AXSUSDT
+- BATUSDT
+- BCHUSDT
+- BELUSDT
+- BTCDOMUSDT
+- C98USDT
+- CELOUSDT
+- CELRUSDT
+- CHRUSDT
+- CHZUSDT
+- COMPUSDT
+- COTIUSDT
+- CRVUSDT
+- CTSIUSDT
+- DASHUSDT
+- DOTUSDT
+- DYDXUSDT
+- EGLDUSDT
+- ENJUSDT
+- ENSUSDT
+- GALAUSDT
+- GRTUSDT
+- GTCUSDT
+- HBARUSDT
+- HOTUSDT
+- ICXUSDT
+- IOSTUSDT
+- IOTAUSDT
+- IOTXUSDT
+- KAVAUSDT
+- KNCUSDT
+- KSMUSDT
+- LPTUSDT
+- MANAUSDT
+- MASKUSDT
+- MTLUSDT
+- NEOUSDT
+- OGNUSDT
+- ONEUSDT
+- ONTUSDT
+- PEOPLEUSDT
+- QTUMUSDT
+- RLCUSDT
+- ROSEUSDT
+- RSRUSDT
+- RUNEUSDT
+- RVNUSDT
+- SANDUSDT
+- SFPUSDT
+- SKLUSDT
+- SNXUSDT
+- SUSHIUSDT
+- THETAUSDT
+- TRBUSDT
+- TRXUSDT
+- VETUSDT
+- XLMUSDT
+- XMRUSDT
+- XTZUSDT
+- YFIUSDT
+- ZECUSDT
+- ZENUSDT
+- ZILUSDT
+- ZRXUSDT
+tier_block_symbols:
+  A:
+  - ADAUSDT
+  - ARBUSDT
+  - FILUSDT
+  S:
+  - ADAUSDT
+  - ARBUSDT
+  - FILUSDT
+timeframes:
+- 1h
+- 4h
+- 1d
+strategy_fixed_tier:
+  macross_d: A
+strategy_max_hold_hours:
+  macross_d: 1440
+strategy_guard_isolated:
+  macross_d:
+    max_positions: 8
+    max_same_direction: 8
