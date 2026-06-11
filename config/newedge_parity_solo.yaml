@@ -1,0 +1,255 @@
+backtest:
+  start: '2022-01-01'
+  end: '2026-04-23'
+  initial_capital: 100
+data:
+  cache_dir: data/cache
+  exchange: binanceusdm
+  lookback_bars: 300
+engine:
+  max_hold_hours: null
+execution:
+  commission_maker: 0.0002
+  commission_taker: 0.0005
+  default_slippage_bps: 0.0
+  funding_interval_hours: 8
+leverage_tiers:
+  A:
+    leverage: 3
+    size_fraction: 0.5
+    risk_per_trade: 0.02
+strategy_leverage_tiers:
+  macross_d:
+    SSS:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    SS:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    S:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    A:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    B:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+    C:
+      leverage: 3
+      size_fraction: 0.5
+      risk_per_trade: 0.02
+strategy_fixed_tier:
+  macross_d: A
+strategy_max_hold_hours:
+  macross_d: 1440
+primary_timeframe: 1h
+regime:
+  adx_period: 14
+  adx_ranging_threshold: 12.0
+  adx_trending_threshold: 30.0
+  bb_period: 20
+  bb_std: 2.0
+  bb_width_lookback: 50
+  bb_width_squeeze_pct: 0.2
+  primary_tf: 1h
+risk:
+  circuit_breaker_pause_hours: 1
+  circuit_breaker_pause_losses: 9999
+  circuit_breaker_stop_losses: 9999
+  correlation_block_threshold: 1.01
+  correlation_lookback: 100
+  daily_drawdown_pause: -1.0
+  daily_drawdown_stop: -1.0
+  deep_floor_dd: null
+  max_positions: 8
+  max_same_direction: 8
+  risk_per_trade: 0.02
+  tp_cooldown_hours: 0.0
+scorer:
+  tier_sss_min_score: 99
+  tier_ss_min_score: 99
+  tier_s_min_score: 99
+  tier_a_min_score: 0
+  tier_b_min_score: 99
+  tier_c_min_score: 99
+  volume_ratio_threshold: 1.8
+  daily_ema_period: 200
+strategies:
+  macross_d:
+    enabled: true
+    fast_period: 20
+    slow_period: 100
+    atr_period: 14
+    atr_tp_mult: 6.0
+    atr_sl_mult: 3.0
+    signal_tf: 1d
+    liq_min_usd: 10000000.0
+    liq_window: 30
+    symbols:
+    - 1000XECUSDT
+    - 1INCHUSDT
+    - AAVEUSDT
+    - ALGOUSDT
+    - ALICEUSDT
+    - ANKRUSDT
+    - ARPAUSDT
+    - ARUSDT
+    - ATOMUSDT
+    - AXSUSDT
+    - BANDUSDT
+    - BATUSDT
+    - BCHUSDT
+    - BELUSDT
+    - BTCDOMUSDT
+    - C98USDT
+    - CELOUSDT
+    - CELRUSDT
+    - CHRUSDT
+    - CHZUSDT
+    - COMPUSDT
+    - COTIUSDT
+    - CRVUSDT
+    - CTSIUSDT
+    - DASHUSDT
+    - DOTUSDT
+    - DYDXUSDT
+    - EGLDUSDT
+    - ENJUSDT
+    - ENSUSDT
+    - FILUSDT
+    - GALAUSDT
+    - GRTUSDT
+    - GTCUSDT
+    - HBARUSDT
+    - HOTUSDT
+    - ICXUSDT
+    - IOSTUSDT
+    - IOTAUSDT
+    - IOTXUSDT
+    - KAVAUSDT
+    - KNCUSDT
+    - KSMUSDT
+    - LPTUSDT
+    - LTCUSDT
+    - MANAUSDT
+    - MASKUSDT
+    - MTLUSDT
+    - NEOUSDT
+    - OGNUSDT
+    - ONEUSDT
+    - ONTUSDT
+    - PEOPLEUSDT
+    - QTUMUSDT
+    - RLCUSDT
+    - ROSEUSDT
+    - RSRUSDT
+    - RUNEUSDT
+    - RVNUSDT
+    - SANDUSDT
+    - SFPUSDT
+    - SKLUSDT
+    - SNXUSDT
+    - STORJUSDT
+    - SUSHIUSDT
+    - THETAUSDT
+    - TRBUSDT
+    - TRXUSDT
+    - UNIUSDT
+    - VETUSDT
+    - XLMUSDT
+    - XMRUSDT
+    - XTZUSDT
+    - YFIUSDT
+    - ZECUSDT
+    - ZENUSDT
+    - ZILUSDT
+    - ZRXUSDT
+symbols:
+- ETHUSDT
+- 1000XECUSDT
+- 1INCHUSDT
+- AAVEUSDT
+- ALGOUSDT
+- ALICEUSDT
+- ANKRUSDT
+- ARPAUSDT
+- ARUSDT
+- ATOMUSDT
+- AXSUSDT
+- BANDUSDT
+- BATUSDT
+- BCHUSDT
+- BELUSDT
+- BTCDOMUSDT
+- C98USDT
+- CELOUSDT
+- CELRUSDT
+- CHRUSDT
+- CHZUSDT
+- COMPUSDT
+- COTIUSDT
+- CRVUSDT
+- CTSIUSDT
+- DASHUSDT
+- DOTUSDT
+- DYDXUSDT
+- EGLDUSDT
+- ENJUSDT
+- ENSUSDT
+- FILUSDT
+- GALAUSDT
+- GRTUSDT
+- GTCUSDT
+- HBARUSDT
+- HOTUSDT
+- ICXUSDT
+- IOSTUSDT
+- IOTAUSDT
+- IOTXUSDT
+- KAVAUSDT
+- KNCUSDT
+- KSMUSDT
+- LPTUSDT
+- LTCUSDT
+- MANAUSDT
+- MASKUSDT
+- MTLUSDT
+- NEOUSDT
+- OGNUSDT
+- ONEUSDT
+- ONTUSDT
+- PEOPLEUSDT
+- QTUMUSDT
+- RLCUSDT
+- ROSEUSDT
+- RSRUSDT
+- RUNEUSDT
+- RVNUSDT
+- SANDUSDT
+- SFPUSDT
+- SKLUSDT
+- SNXUSDT
+- STORJUSDT
+- SUSHIUSDT
+- THETAUSDT
+- TRBUSDT
+- TRXUSDT
+- UNIUSDT
+- VETUSDT
+- XLMUSDT
+- XMRUSDT
+- XTZUSDT
+- YFIUSDT
+- ZECUSDT
+- ZENUSDT
+- ZILUSDT
+- ZRXUSDT
+timeframes:
+- 1h
+- 1d

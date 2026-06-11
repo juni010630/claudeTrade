@@ -29,6 +29,7 @@ from risk.margin_tiers import MarginTierTable
 from risk.position_sizer import PositionSizer
 from signals.scorer import ConfluenceScorer
 from strategies.ema_cross import EMACrossStrategy
+from strategies.ema_slow_daily import EmaSlowDailyStrategy
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
 
@@ -52,6 +53,7 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         "ema_cross_slow":     EMACrossStrategy,   # 다중 속도 변형 (strategy_name으로 구분)
         "multi_tf_breakout":  MultiTFBreakoutStrategy,
         "mean_reversion":     MeanReversionStrategy,
+        "macross_d":          EmaSlowDailyStrategy,  # 1d 슬로우 크로스 (NEWEDGE_GREEDY_RESULTS.md)
     }
     strategies = []
     for key, cls in strategy_map.items():
@@ -180,6 +182,9 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         breakeven_trigger_r=p.get("engine", {}).get("breakeven_trigger_r"),
         trailing_r_mult=p.get("engine", {}).get("trailing_r_mult"),
         strategy_min_score=p.get("strategy_min_score"),
+        strategy_fixed_tier=p.get("strategy_fixed_tier"),
+        strategy_max_hold_hours=p.get("strategy_max_hold_hours"),
+        strategy_guard_isolated=p.get("strategy_guard_isolated"),
         strategy_block_hours=p.get("strategy_block_hours"),
         strategy_block_symbols=p.get("strategy_block_symbols"),
         tier_block_symbols=p.get("tier_block_symbols"),

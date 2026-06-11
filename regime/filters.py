@@ -12,6 +12,8 @@ _ELIGIBLE_REGIMES: dict[str, set[MarketRegime]] = {
     # 횡보 판정은 전략 내부 게이트(use_regime_gate / max_adx)가 담당 — 1h ADX 기반
     # 엔진 RANGING은 거의 발동하지 않아 (2023조차 0건) 라우팅은 전체 허용으로 변경
     "mean_reversion":     _ALL_REGIMES,
+    # 1d 슬로우 크로스 — 국면 무관 검증 (NEWEDGE_GREEDY_RESULTS.md), 게이트 없음
+    "macross_d":          _ALL_REGIMES,
     "multi_tf_breakout":  {MarketRegime.TRENDING, MarketRegime.PRE_BREAKOUT},
     "funding_reversion":  _ALL_REGIMES,
     "volume_imbalance":   _ALL_REGIMES,

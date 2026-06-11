@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterator
 
+import numpy as np
 import pandas as pd
 
 from data.cache import ParquetCache
@@ -49,6 +50,20 @@ class DataLoader:
                 funding_df.set_index("timestamp") if funding_df is not None else pd.DataFrame()
             )
 
+        # 성능: (sym, tf)별 봉 close-time int64 배열 사전계산 → iterate에서 searchsorted O(log n).
+        # (기존: 봉마다 전체 인덱스 + timedelta 덧셈 + 불리언 take O(n) — 다심볼에서 지배 비용)
+        self._close_i8: dict[tuple[str, str], np.ndarray] = {}
+        for sym in symbols:
+            for tf in timeframes:
+                idx = self._ohlcv[sym][tf].index
+                self._close_i8[(sym, tf)] = (idx + pd.Timedelta(tf)).asi8
+        self._fund_i8: dict[str, np.ndarray] = {
+            sym: fd.index.asi8 for sym, fd in self._funding.items()
+        }
+        # (sym, tf)별 직전 윈도 캐시 — 같은 (start, end) 구간이면 프레임 재사용 (4h/1d는 봉 간 대부분 동일).
+        # 스냅샷 프레임은 전 소비자 read-only (변형 없음 확인) → 내용 비트동일.
+        self._win_cache: dict[tuple[str, str], tuple[int, int, pd.DataFrame]] = {}
+
     def iterate(
         self,
         since: pd.Timestamp | None = None,
@@ -72,31 +87,35 @@ class DataLoader:
         if until is not None:
             timestamps = timestamps[timestamps < until]
 
+        primary_delta = pd.Timedelta(self.primary_tf)
         for ts in timestamps:
 
             bars: dict[str, dict[str, pd.DataFrame]] = {}
             # ts = primary_tf 봉의 open time. effective time = ts + primary_delta (봉 close 시점).
             # 각 TF의 봉은 close_time(= open + tf_delta) ≤ effective_time 인 것만 포함.
             # 이래야 미마감 4h/1d 봉의 미래 데이터를 사용하지 않음.
-            primary_delta = pd.Timedelta(self.primary_tf)
             effective_time = ts + primary_delta
+            eff_i8 = effective_time.value
             for sym in self.symbols:
                 bars[sym] = {}
                 for tf in self.timeframes:
-                    df = self._ohlcv[sym][tf]
-                    tf_delta = pd.Timedelta(tf)
-                    # 봉의 close time = open time + tf_delta
-                    mask = (df.index + tf_delta) <= effective_time
-                    sub = df[mask].iloc[-self.lookback :]
-                    bars[sym][tf] = sub.reset_index()
+                    # close_time ≤ effective_time 인 행 수 = searchsorted (기존 마스크와 동일 결과)
+                    end = int(np.searchsorted(self._close_i8[(sym, tf)], eff_i8, side="right"))
+                    start = max(0, end - self.lookback)
+                    cached = self._win_cache.get((sym, tf))
+                    if cached is not None and cached[0] == start and cached[1] == end:
+                        bars[sym][tf] = cached[2]
+                    else:
+                        sub = self._ohlcv[sym][tf].iloc[start:end].reset_index()
+                        self._win_cache[(sym, tf)] = (start, end, sub)
+                        bars[sym][tf] = sub
 
             funding_rates: dict[str, float] = {}
             for sym in self.symbols:
                 fd = self._funding[sym]
                 if not fd.empty:
-                    mask = fd.index <= effective_time
-                    recent = fd[mask]
-                    funding_rates[sym] = float(recent["rate"].iloc[-1]) if not recent.empty else 0.0
+                    pos = int(np.searchsorted(self._fund_i8[sym], eff_i8, side="right"))
+                    funding_rates[sym] = float(fd["rate"].iloc[pos - 1]) if pos > 0 else 0.0
                 else:
                     funding_rates[sym] = 0.0
 

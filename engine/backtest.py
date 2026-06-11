@@ -66,6 +66,10 @@ class BacktestEngine:
         daily_reset_tz: str = "UTC",               # 일일 DD 리셋 기준 시간대 (예: "Asia/Seoul")
         cross_worst_case_check: bool = True,       # 다중 포지션 동시 역행 worst-case 청산 체크
         strategy_min_score: dict[str, int] | None = None,  # 전략별 최소 score 게이트 (scorer 위 덮어씀)
+        strategy_fixed_tier: dict[str, str] | None = None,  # 전략별 고정 티어 (scorer 우회 — 자체 검증 완결형 전략용)
+        strategy_max_hold_hours: dict[str, float] | None = None,  # 전략별 최대 보유시간 (글로벌 max_hold 덮어씀)
+        strategy_guard_isolated: dict[str, dict] | None = None,  # 전략별 독립 가드 북: {전략: {max_positions, max_same_direction}}
+        #   격리 전략 = 자체 한도만 적용(+심볼 중복·TP쿨다운은 글로벌), 비격리 전략의 가드/상관 집계에서 격리 포지션 제외
         strategy_block_hours: dict[str, list[int]] | None = None,  # 전략별 차단 UTC 시간대
         strategy_block_symbols: dict[str, list[str]] | None = None,  # 전략별 차단 심볼
         tier_block_symbols: dict[str, list[str]] | None = None,  # 티어별 차단 심볼 (e.g. {"S": ["ADAUSDT"]})
@@ -144,6 +148,9 @@ class BacktestEngine:
         self._daily_reset_tz = daily_reset_tz
         self._cross_worst_case_check = cross_worst_case_check
         self._strategy_min_score = strategy_min_score or {}
+        self._strategy_fixed_tier = strategy_fixed_tier or {}
+        self._strategy_max_hold_hours = strategy_max_hold_hours or {}
+        self._strategy_guard_isolated = strategy_guard_isolated or {}
         self._strategy_block_hours = {
             k: set(v) for k, v in (strategy_block_hours or {}).items()
         }
@@ -284,6 +291,17 @@ class BacktestEngine:
             f"포지션: {state.open_position_count}개"
         )
 
+    def _state_excluding_isolated(self, state):
+        """비격리 전략의 가드/상관 평가용 — 격리 전략 포지션을 제외한 state 뷰."""
+        if not self._strategy_guard_isolated:
+            return state
+        pos = {s: p for s, p in state.positions.items()
+               if p.strategy not in self._strategy_guard_isolated}
+        if len(pos) == len(state.positions):
+            return state
+        from dataclasses import replace
+        return replace(state, positions=pos)
+
     # ── 시그널 덤프/리플레이 ─────────────────────────────────────
     def _generate_all_candidates(
         self, snapshot: MarketSnapshot, regime, prices: dict[str, float],
@@ -302,16 +320,21 @@ class BacktestEngine:
                     continue
                 if signal.direction in self._block_directions:
                     continue
-                scored = self.scorer.score(signal, snapshot, regime)
-                if scored.tier == LeverageTier.NO_TRADE:
-                    continue
-                min_req = self._strategy_min_score.get(strategy.name)
-                if min_req is not None and scored.total < min_req:
-                    continue
+                fixed_tier = self._strategy_fixed_tier.get(strategy.name)
+                if fixed_tier is not None:
+                    score_total, tier_value = 3, fixed_tier  # scorer 우회 — 전략 자체 검증 완결형
+                else:
+                    scored = self.scorer.score(signal, snapshot, regime)
+                    if scored.tier == LeverageTier.NO_TRADE:
+                        continue
+                    min_req = self._strategy_min_score.get(strategy.name)
+                    if min_req is not None and scored.total < min_req:
+                        continue
+                    score_total, tier_value = scored.total, scored.tier.value
                 if self._block_weekdays and signal.timestamp.weekday() in self._block_weekdays:
                     continue
                 blocked_tiers = self._strategy_block_tiers.get(strategy.name)
-                if blocked_tiers and scored.tier.value in blocked_tiers:
+                if blocked_tiers and tier_value in blocked_tiers:
                     continue
                 blocked = self._strategy_block_hours.get(strategy.name)
                 if blocked and signal.timestamp.hour in blocked:
@@ -330,8 +353,8 @@ class BacktestEngine:
                     "entry_price": signal.entry_price,
                     "tp_price": signal.tp_price,
                     "sl_price": signal.sl_price,
-                    "score": scored.total,
-                    "tier": scored.tier.value,
+                    "score": score_total,
+                    "tier": tier_value,
                 })
         return candidates
 
@@ -436,9 +459,10 @@ class BacktestEngine:
                     # SL STOP_MARKET은 슬리피지로 가격매칭이 불안정해 external_close로
                     # 분류되므로, reason이 아닌 실현 pnl 부호로 판정해야 손실이 누락되지 않음.
                     last_trade = self.ledger._records[-1] if self.ledger._records else None
-                    self.circuit_breaker.record_result(
-                        pos.strategy, last_trade is not None and last_trade.pnl > 0
-                    )
+                    if pos.strategy not in self._strategy_guard_isolated:  # 격리 북 = CB 미기록
+                        self.circuit_breaker.record_result(
+                            pos.strategy, last_trade is not None and last_trade.pnl > 0
+                        )
                     # 잔여 주문 정리 — 특히 비-reduceOnly 피라미드 STOP은
                     # 포지션 청산 후에도 살아남아 고아 포지션을 열 수 있음
                     if hasattr(self.broker, "cancel_all_orders"):
@@ -554,9 +578,10 @@ class BacktestEngine:
             if tier_blocked and cand["symbol"] in tier_blocked:
                 continue
 
-            cb_status = self.circuit_breaker.get_status(cand["strategy"], now)
-            if cb_status != BreakerStatus.ACTIVE:
-                continue
+            if cand["strategy"] not in self._strategy_guard_isolated:  # 격리 북 = CB 면제 (파국 방어는 딥플로어)
+                cb_status = self.circuit_breaker.get_status(cand["strategy"], now)
+                if cb_status != BreakerStatus.ACTIVE:
+                    continue
 
             # TP 연장: 동일 방향 시그널 재발생 시 기존 포지션 TP 연장 (신규 진입 없음)
             if self._tp_extend_on_signal:
@@ -570,11 +595,26 @@ class BacktestEngine:
                         existing.tp_price = new_tp
                     continue  # 신규 진입 없음
 
-            if not self.guards.is_entry_allowed(state, _cand_proxy(cand)):
-                continue
+            iso_cfg = self._strategy_guard_isolated.get(cand["strategy"])
+            if iso_cfg is not None:
+                # 독립 북: 자체 슬롯/방향 한도 + 글로벌 심볼중복·TP쿨다운만 (가드/상관 격리)
+                if cand["symbol"] in state.positions:
+                    continue
+                own = [p for p in state.positions.values() if p.strategy == cand["strategy"]]
+                if len(own) >= int(iso_cfg.get("max_positions", 9999)):
+                    continue
+                if sum(1 for p in own if p.direction == cand["direction"]) >= \
+                        int(iso_cfg.get("max_same_direction", 9999)):
+                    continue
+                if self.guards.is_cooldown_active(cand["symbol"], cand["strategy"], now):
+                    continue
+            else:
+                _g_state = self._state_excluding_isolated(state)
+                if not self.guards.is_entry_allowed(_g_state, _cand_proxy(cand)):
+                    continue
 
-            if self.corr_filter.is_blocked(_cand_proxy(cand), state):
-                continue
+                if self.corr_filter.is_blocked(_cand_proxy(cand), _g_state):
+                    continue
 
             # RSI 모멘텀 (진입방향 기준): 게이트 차단 + 가중 사이징용 dir_rsi
             # long이면 RSI 그대로, short이면 100-RSI (높을수록 "내 방향으로 강모멘텀")
@@ -817,11 +857,12 @@ class BacktestEngine:
 
             close = float(bar["close"])
 
-            # timeout 체크 (max_hold_hours)
+            # timeout 체크 (max_hold_hours — 전략별 오버라이드 우선)
             hit_time = False
-            if self.max_hold_hours is not None:
+            hold_limit = self._strategy_max_hold_hours.get(pos.strategy, self.max_hold_hours)
+            if hold_limit is not None:
                 elapsed_h = (snapshot.timestamp - pos.opened_at).total_seconds() / 3600
-                hit_time = elapsed_h >= self.max_hold_hours
+                hit_time = elapsed_h >= hold_limit
 
             # sub-bar 데이터 확보 시도
             sub_df = snapshot.bars.get(sym, {}).get(sub_tf) if sub_tf else None
@@ -1054,7 +1095,8 @@ class BacktestEngine:
 
         last_trade = self.ledger._records[-1] if self.ledger._records else None
         is_win = last_trade is not None and last_trade.pnl > 0
-        self.circuit_breaker.record_result(pos.strategy, is_win)
+        if pos.strategy not in self._strategy_guard_isolated:  # 격리 북 = CB 미기록 (글로벌 카운터 오염 방지)
+            self.circuit_breaker.record_result(pos.strategy, is_win)
 
         # TP Reversal: TP 히트 시 반대 방향으로 동일 사이즈 진입
         if (self._tp_reversal and exit_reason == "tp"
@@ -1482,7 +1524,7 @@ class BacktestEngine:
 
         # forced_stop(일일 DD)은 전략 손실로 circuit_breaker에 기록.
         # liquidation은 계정 전반 이벤트라 특정 전략 귀속 부적절 → 미기록.
-        if reason == "forced_stop":
+        if reason == "forced_stop" and pos.strategy not in self._strategy_guard_isolated:
             last = self.ledger._records[-1] if self.ledger._records else None
             if last is not None:
                 self.circuit_breaker.record_result(pos.strategy, last.pnl > 0)
