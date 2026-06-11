@@ -599,7 +599,7 @@ def main() -> None:
                         # 소진되면 경고 없이 USDT 정가 결제로 복귀하므로 저잔고 경보가 필수.
                         try:
                             bnb_total = float(bal.get("BNB", {}).get("total", 0) or 0)
-                            bnb_px = float(exchange.fetch_ticker("BNB/USDT")["last"])
+                            bnb_px = float(exchange.fetch_ticker("BNB/USDT:USDT")["last"])
                             bnb_usd = bnb_total * bnb_px
                             # 소진 추산: trades.csv 최근 30일 수수료(모델 추정치) × 0.9(BNB 결제분) → 일소비율
                             bnb_days = None
