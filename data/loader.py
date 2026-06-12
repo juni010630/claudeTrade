@@ -52,13 +52,15 @@ class DataLoader:
 
         # 성능: (sym, tf)별 봉 close-time int64 배열 사전계산 → iterate에서 searchsorted O(log n).
         # (기존: 봉마다 전체 인덱스 + timedelta 덧셈 + 불리언 take O(n) — 다심볼에서 지배 비용)
+        # ⚠️ asi8은 인덱스 단위(ns/us/ms)를 그대로 따르는데 비교 상대 Timestamp.value는 항상 ns —
+        # pandas 3.x가 parquet을 ms로 읽으면 단위 불일치로 전 봉 통과(look-ahead) → as_unit("ns") 필수.
         self._close_i8: dict[tuple[str, str], np.ndarray] = {}
         for sym in symbols:
             for tf in timeframes:
                 idx = self._ohlcv[sym][tf].index
-                self._close_i8[(sym, tf)] = (idx + pd.Timedelta(tf)).asi8
+                self._close_i8[(sym, tf)] = (idx + pd.Timedelta(tf)).as_unit("ns").asi8
         self._fund_i8: dict[str, np.ndarray] = {
-            sym: fd.index.asi8 for sym, fd in self._funding.items()
+            sym: fd.index.as_unit("ns").asi8 for sym, fd in self._funding.items()
         }
         # (sym, tf)별 직전 윈도 캐시 — 같은 (start, end) 구간이면 프레임 재사용 (4h/1d는 봉 간 대부분 동일).
         # 스냅샷 프레임은 전 소비자 read-only (변형 없음 확인) → 내용 비트동일.
