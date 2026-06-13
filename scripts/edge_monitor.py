@@ -47,7 +47,10 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("edge_monitor")
 
 # ── 기준점 (재배포 시 갱신) ───────────────────────────────────────
-ANCHOR = pd.Timestamp("2026-06-12", tz="UTC")  # v18-triple 배포(06-11) 후 첫 완전 자정
+ANCHOR = pd.Timestamp("2026-06-09", tz="UTC")  # 현 보유 포지션 최고참(LTC/ARPA 06-10) 이전 →
+#   리플레이가 라이브와 같은 포지션을 들고 시작(미보유 시 06-12 재시그널을 '리플레이전용' 오경보).
+#   06-09(v17 배포일)부터면 공통전략(ema/multi/mean_rev)은 v17=v18 동일, macross_d는 06-12까지 무신호라
+#   v18 리플레이가 라이브 5진입을 5/5 정확 재현(2026-06-13 검증). 보유분 전부 청산 후 클린 자정으로 재앵커 권장.
 CONFIG = "config/final_v18_triple.yaml"
 BASELINE = "config/edge_baseline_v18.json"
 # replay 시작 자본: 신호/슬리피지 패리티엔 무관(포지션 사이즈만 스케일하고, ③ 롤링은
