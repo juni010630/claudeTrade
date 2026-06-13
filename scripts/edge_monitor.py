@@ -13,7 +13,8 @@
 파국 경로는 딥플로어(live_trade)가 담당.
 
 알림: WARN/ALERT 시 즉시, 월요일엔 무소식이어도 주간 요약. 실행 실패도 텔레그램.
-재배포(config 변경) 시: ANCHOR/ANCHOR_CAPITAL 갱신 + 베이스라인 재생성 필수.
+재배포(config 변경) 시: ANCHOR/CONFIG/BASELINE 갱신 + 베이스라인 재생성 필수.
+(ANCHOR_CAPITAL은 라이브 잔고 자동조회로 대체 — 신호/슬리피지 패리티엔 무관해 정밀값 불요.)
 
 사용:
   python scripts/edge_monitor.py                # 정기 실행 (timer)
@@ -46,10 +47,13 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("edge_monitor")
 
 # ── 기준점 (재배포 시 갱신) ───────────────────────────────────────
-ANCHOR = pd.Timestamp("2026-06-10", tz="UTC")  # v17 딥플로어 재시작 후 첫 flat 자정
-ANCHOR_CAPITAL = 9456.15                        # 재시작 시점 실잔고
-CONFIG = "config/final_v17.yaml"
-BASELINE = "config/edge_baseline_v17.json"
+ANCHOR = pd.Timestamp("2026-06-12", tz="UTC")  # v18-triple 배포(06-11) 후 첫 완전 자정
+CONFIG = "config/final_v18_triple.yaml"
+BASELINE = "config/edge_baseline_v18.json"
+# replay 시작 자본: 신호/슬리피지 패리티엔 무관(포지션 사이즈만 스케일하고, ③ 롤링은
+# 실잔고 로그를 씀) → 정밀값 불필요. main에서 라이브 잔고를 API로 긁어 쓰고,
+# 못 긁으면(--no-balance/조회 실패) 이 폴백 사용.
+ANCHOR_CAPITAL_FALLBACK = 10000.0
 
 # ── 파일 경로 ─────────────────────────────────────────────────────
 CACHE_DIR = Path("data/edge_cache")
@@ -137,14 +141,14 @@ def refresh_cache(symbols: list[str], timeframes: list[str]) -> None:
 
 
 # ── ② 리플레이 ────────────────────────────────────────────────────
-def run_replay(p: dict):
+def run_replay(p: dict, capital: float):
     loader = DataLoader(
         symbols=p["symbols"], timeframes=p["timeframes"],
         primary_tf=p.get("primary_timeframe", "1h"),
         cache_dir=str(CACHE_DIR),
         lookback=p.get("data", {}).get("lookback_bars", 300),
     )
-    engine = rb.build_engine(p, ANCHOR_CAPITAL)
+    engine = rb.build_engine(p, capital)
     # loader.iterate의 since는 봉 open 기준, 스냅샷 timestamp는 close 기준(open+1h).
     # 라이브가 ANCHOR 정각에 처리한 스냅샷(= open ANCHOR-1h 봉)을 포함하려면 1h 앞당김.
     primary_delta = pd.Timedelta(p.get("primary_timeframe", "1h"))
@@ -231,20 +235,28 @@ def slippage_bps(live_row, rep_row) -> float:
 
 
 # ── ⑤ 일별 equity 로그 + 롤링 백분위 ──────────────────────────────
-def append_equity_log(skip_balance: bool) -> None:
-    if skip_balance:
-        return
+def fetch_usdt_balance() -> float | None:
+    """라이브 USDT 총잔고. 조회 실패 시 None."""
+    try:
+        ex = ccxt.binanceusdm({
+            "apiKey": os.environ.get("BINANCE_API_KEY", ""),
+            "secret": os.environ.get("BINANCE_SECRET", ""),
+            "enableRateLimit": True,
+        })
+        return float(ex.fetch_balance().get("USDT", {}).get("total", 0) or 0) or None
+    except Exception:
+        logger.warning("잔고 조회 실패 — replay 폴백 자본 사용")
+        return None
+
+
+def append_equity_log(usdt: float | None) -> None:
+    if usdt is None:
+        return  # --no-balance or 조회 실패
     today = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
     if EQUITY_LOG.exists():
         with open(EQUITY_LOG) as f:
             if any(row.startswith(today) for row in f):
                 return  # 오늘 이미 기록
-    ex = ccxt.binanceusdm({
-        "apiKey": os.environ.get("BINANCE_API_KEY", ""),
-        "secret": os.environ.get("BINANCE_SECRET", ""),
-        "enableRateLimit": True,
-    })
-    usdt = float(ex.fetch_balance().get("USDT", {}).get("total", 0) or 0)
     EQUITY_LOG.parent.mkdir(parents=True, exist_ok=True)
     new_file = not EQUITY_LOG.exists()
     with open(EQUITY_LOG, "a", newline="") as f:
@@ -289,12 +301,14 @@ def main() -> None:
     try:
         with open(CONFIG) as f:
             p = yaml.safe_load(f)
+        usdt = None if args.no_balance else fetch_usdt_balance()
+        capital = usdt if usdt else ANCHOR_CAPITAL_FALLBACK
         refresh_cache(p["symbols"], p["timeframes"])
-        engine = run_replay(p)
+        engine = run_replay(p, capital)
         live = live_entries()
         rep = replay_entries(engine)
         matched, live_only, rep_only = match_events(live, rep)
-        append_equity_log(args.no_balance)
+        append_equity_log(usdt)
 
         lines, severity = [], "OK"
         days = max(0, (pd.Timestamp.now(tz="UTC") - ANCHOR).days)

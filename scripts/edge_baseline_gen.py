@@ -19,8 +19,8 @@ import yaml
 from data.loader import DataLoader
 import scripts.run_backtest as rb
 
-CONFIG = "config/final_v17.yaml"
-OUT = "config/edge_baseline_v17.json"
+CONFIG = sys.argv[1] if len(sys.argv) > 1 else "config/final_v17.yaml"
+OUT = sys.argv[2] if len(sys.argv) > 2 else "config/edge_baseline_v17.json"
 WINDOWS = {"30d": 720, "90d": 2160}  # 1h 봉 수
 
 p = yaml.safe_load(open(CONFIG))
@@ -37,7 +37,7 @@ until = pd.Timestamp(bt["end"], tz="UTC") if bt.get("end") else None
 print(f"전구간 백테 실행 ({since.date()} ~ {until.date() if until is not None else '최신'})…")
 report = engine.run(loader.iterate(since=since, until=until))
 eq = engine.equity_curve.to_series()
-print(f"equity curve {len(eq)}봉, 최종 ${eq.iloc[-1]:,.0f} (기록치 $8,991 일치 확인)")
+print(f"equity curve {len(eq)}봉, 최종 ${eq.iloc[-1]:,.0f}")
 
 grids = {}
 pctl = list(range(101))
