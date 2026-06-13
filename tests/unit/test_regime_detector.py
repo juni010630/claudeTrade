@@ -45,5 +45,8 @@ def test_strategy_eligibility():
     assert not is_strategy_eligible(MarketRegime.RANGING, "ema_cross")
     assert is_strategy_eligible(MarketRegime.TRENDING, "multi_tf_breakout")
     assert not is_strategy_eligible(MarketRegime.RANGING, "multi_tf_breakout")
+    # momentum_breakout(15m Scalp 검증 포팅)은 전체 국면 허용 — 무게이트 검증
+    assert is_strategy_eligible(MarketRegime.TRENDING, "momentum_breakout")
+    assert is_strategy_eligible(MarketRegime.RANGING, "momentum_breakout")
     # 미등록 전략은 항상 차단
-    assert not is_strategy_eligible(MarketRegime.TRENDING, "momentum_breakout")
+    assert not is_strategy_eligible(MarketRegime.TRENDING, "nonexistent_strategy")

@@ -31,6 +31,7 @@ from signals.scorer import ConfluenceScorer
 from strategies.ema_cross import EMACrossStrategy
 from strategies.ema_slow_daily import EmaSlowDailyStrategy
 from strategies.mean_reversion import MeanReversionStrategy
+from strategies.momentum_breakout import MomentumBreakoutStrategy
 from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
 
 import pandas as pd
@@ -54,6 +55,7 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         "multi_tf_breakout":  MultiTFBreakoutStrategy,
         "mean_reversion":     MeanReversionStrategy,
         "macross_d":          EmaSlowDailyStrategy,  # 1d 슬로우 크로스 (NEWEDGE_GREEDY_RESULTS.md)
+        "momentum_breakout":  MomentumBreakoutStrategy,  # 15m 모멘텀 (Scalp 검증 포팅)
     }
     strategies = []
     for key, cls in strategy_map.items():
@@ -218,6 +220,9 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         adx_scaling=engine_kwargs.pop("adx_scaling", p.get("adx_scaling", False)),
         abort_mdd_threshold=abort_mdd if abort_mdd is not None else r.get("deep_floor_dd"),
         isolated_margin=isolated_margin,
+        maker_entry=e.get("backtest_maker_entry", False),  # 백테 진입 maker 지정가 모드 (Scalp 의미론)
+        maker_entry_strategies=e.get("backtest_maker_entry_strategies"),  # 지정 전략만 maker (None=전체)
+        maker_entry_fallback=e.get("backtest_maker_entry_fallback", False),  # maker 미체결 시 taker 폴백
         **engine_kwargs,
     )
 

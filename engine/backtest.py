@@ -107,6 +107,12 @@ class BacktestEngine:
         btc_mom_lookback: int = 20,                   # BTC 모멘텀 1d 봉수
         notifier=None,
         trade_log_path: str | None = None,  # CSV 거래 로그 경로 (라이브용)
+        maker_entry: bool = False,  # True → 진입을 돌파레벨 지정가(LIMIT)로 다음 봉에서 체결 (Scalp maker 의미론 재현).
+                                    #   미충족 시 진입 스킵. 기본 False(기존 MARKET 진입 보존, 무영향).
+        maker_entry_strategies: list | None = None,  # 지정 시 해당 전략만 maker 진입, 나머지는 taker.
+                                                     #   None=maker_entry 적용 전략 무제한(기존 동작).
+        maker_entry_fallback: bool = False,  # True → maker 미체결(리테스트 없음) 시 다음 봉 종가에 taker 폴백.
+                                             #   라이브 maker_entry(타임아웃→taker) 동작 모델링. 기본 False=하드스킵.
     ) -> None:
         self.strategies = strategies
         self.regime_detector = regime_detector or RegimeDetector()
@@ -227,6 +233,13 @@ class BacktestEngine:
 
         self._last_day: pd.Timestamp | None = None
         self._last_dd_alert: DrawdownAction | None = None
+
+        # 진입 maker 모드: 다음 봉 지정가 체결 대기열 (Scalp maker 의미론).
+        # symbol → cand dict (+ limit_price). 다음 봉에서 low<=limit(롱)/high>=limit(숏)이면 체결, 아니면 폐기.
+        self._maker_entry = maker_entry
+        self._maker_entry_strategies = set(maker_entry_strategies) if maker_entry_strategies else None
+        self._maker_entry_fallback = maker_entry_fallback
+        self._pending_entries: dict[str, dict] = {}
 
     def _localize(self, ts: pd.Timestamp) -> pd.Timestamp:
         """daily_reset_tz 기준 로컬 시간으로 변환."""
@@ -546,9 +559,11 @@ class BacktestEngine:
             # 강제 청산
             for sym in list(state.positions.keys()):
                 self._force_close(sym, prices.get(sym, 0.0), now, "forced_stop")
+            self._pending_entries.clear()  # maker 대기열 폐기 — 이 봉은 5.5 미도달(1봉 수명 유지)
             self._record_equity(now, prices)
             return
         if dd_action == DrawdownAction.PAUSE:
+            self._pending_entries.clear()  # maker 대기열 폐기 — 이 봉은 5.5 미도달(1봉 수명 유지)
             self._record_equity(now, prices)
             return
 
@@ -570,6 +585,12 @@ class BacktestEngine:
             candidates = self._generate_all_candidates(snapshot, regime, prices)
             if self._dump_mode:
                 self._signal_log.extend(candidates)
+
+        # 5.5 Maker 진입 대기열 체결 (직전 봉에서 큐잉된 지정가). 현재 봉 high/low가
+        #     limit을 터치하면 limit 가격에 maker 체결, 아니면 폐기. 신규 시그널 큐잉보다 먼저 처리.
+        if self._maker_entry and self._pending_entries:
+            self._fill_pending_entries(snapshot, bars, now, regime)
+            state = self.tracker.snapshot()
 
         # 6. 동적 필터 + 체결
         for cand in candidates:
@@ -703,6 +724,30 @@ class BacktestEngine:
                 continue
 
             side = OrderSide.BUY if cand["direction"] == "long" else OrderSide.SELL
+
+            # ── Maker 진입 모드 (Scalp 의미론): 돌파레벨(=시그널 종가) 지정가를
+            #    다음 봉에서 대기. low<=limit(롱)/high>=limit(숏) 시 limit 가격에 maker 체결.
+            #    미충족 시 폐기(가격이 달아난 거래 스킵 = Scalp의 핵심 선택효과). ──
+            _use_maker = self._maker_entry and (
+                self._maker_entry_strategies is None
+                or cand["strategy"] in self._maker_entry_strategies
+            )
+            if _use_maker:
+                if cand["symbol"] in state.positions or cand["symbol"] in self._pending_entries:
+                    continue
+                self._pending_entries[cand["symbol"]] = {
+                    "direction": cand["direction"],
+                    "limit_price": cand["entry_price"],
+                    "tp_price": cand["tp_price"],
+                    "sl_price": cand["sl_price"],
+                    "size_usd": size_usd,
+                    "leverage": leverage,
+                    "strategy": cand["strategy"],
+                    "score": cand["score"],
+                    "tier": cand["tier"],
+                }
+                continue
+
             mkt_price = prices.get(cand["symbol"], cand["entry_price"])
             shift = mkt_price - cand["entry_price"]
 
@@ -785,6 +830,114 @@ class BacktestEngine:
 
         # 6. 최종 MTM 재계산 후 자산곡선 기록 + early-stop 체크
         self._record_equity(now, prices)
+
+    def _fill_pending_entries(
+        self, snapshot: MarketSnapshot, bars: dict[str, pd.Series],
+        now: pd.Timestamp, regime,
+    ) -> None:
+        """Maker 진입 대기열 처리 (Scalp maker 의미론).
+
+        직전 봉에서 큐잉된 돌파레벨 지정가를 현재 봉에서 검사:
+          롱: 현재 봉 low <= limit → limit 가격에 maker 체결
+          숏: 현재 봉 high >= limit → limit 가격에 maker 체결
+        미충족 → 폐기(가격 달아남 = 진입 안 함). 충족이라도 심볼에 이미 포지션이면 스킵.
+
+        한도(max_positions/max_same_direction/상관/쿨다운/심볼중복)는 **체결 시점에
+        per-fill로 재평가**한다 — taker 경로가 체결마다 state를 갱신해 한도를 강제하는
+        것과 동일한 의미론을, 단지 한 봉 뒤로 미뤄 적용. 큐잉 시점엔 같은 봉의 형제
+        pending이 서로를 보지 못해(taker처럼 즉시 포지션이 안 생김) 한도를 우회할 수
+        있으므로, 권위 있는 게이트는 여기다. (CB는 큐잉 시점=시그널 시점 게이트를 유지 —
+        거래소에 이미 놓인 지정가는 봉 중 CB 트립과 무관하게 체결되므로 재평가하지 않음.)
+        체결 봉은 이번 봉 TP/SL 검사를 받지 않음(이미 _process_tp_sl_trailing 이후 호출됨)
+          → Scalp scan_off=1(체결봉 다음부터 청산 스캔)과 동일.
+        """
+        pend = self._pending_entries
+        self._pending_entries = {}
+        for sym, pe in pend.items():
+            state = self.tracker.snapshot()       # per-fill 갱신 → 한도 강제 (taker 패리티)
+            bar = bars.get(sym)
+            if bar is None:
+                continue
+            limit = float(pe["limit_price"])
+            low = float(bar["low"])
+            high = float(bar["high"])
+            touched = (pe["direction"] == "long" and low <= limit) or \
+                      (pe["direction"] == "short" and high >= limit)
+            if touched:
+                entry_px, otype = limit, OrderType.LIMIT      # maker 체결 (slippage 0)
+            elif self._maker_entry_fallback:
+                entry_px, otype = float(bar["close"]), OrderType.MARKET  # taker 폴백
+            else:
+                continue  # 가격 달아남 → 진입 스킵 (Scalp 핵심 선택효과)
+
+            # ── 한도 게이트 (체결 시점 권위 평가). taker 경로(L617-636)와 동일하나
+            #    CB만은 예외(큐잉=시그널 시점 게이트 유지 — 위 docstring 참조)가 유일한 의도된 차이.
+            #    timestamp=now → 쿨다운을 체결 봉(t+1) 기준으로 평가(주문 체결 시점 = 라이브 의미).
+            #    taker는 시그널 봉(t) 기준이라, cooldown>0 과 maker_entry 동시 사용 시에만 1봉 차이
+            #    (현 config엔 그 조합 없음). ──
+            proxy = Signal(
+                symbol=sym, strategy=pe["strategy"], direction=pe["direction"],
+                entry_price=entry_px, tp_price=pe["tp_price"], sl_price=pe["sl_price"],
+                timestamp=now,
+            )
+            iso_cfg = self._strategy_guard_isolated.get(pe["strategy"])
+            if iso_cfg is not None:
+                if sym in state.positions:
+                    continue
+                own = [p for p in state.positions.values() if p.strategy == pe["strategy"]]
+                if len(own) >= int(iso_cfg.get("max_positions", 9999)):
+                    continue
+                if sum(1 for p in own if p.direction == pe["direction"]) >= \
+                        int(iso_cfg.get("max_same_direction", 9999)):
+                    continue
+                if self.guards.is_cooldown_active(sym, pe["strategy"], now):
+                    continue
+            else:
+                _g_state = self._state_excluding_isolated(state)
+                if not self.guards.is_entry_allowed(_g_state, proxy):
+                    continue  # max_positions/same_direction/심볼중복/DD/쿨다운
+                if self.corr_filter.is_blocked(proxy, _g_state):
+                    continue
+
+            shift = entry_px - limit                          # 체결가 기준으로 tp/sl 이동
+            tp_px, sl_px = pe["tp_price"] + shift, pe["sl_price"] + shift
+            side = OrderSide.BUY if pe["direction"] == "long" else OrderSide.SELL
+            tier = LeverageTier(pe["tier"])
+            scored_proxy = SignalScore(
+                total=pe["score"], tier=tier,
+                signal=Signal(
+                    symbol=sym, strategy=pe["strategy"], direction=pe["direction"],
+                    entry_price=entry_px, tp_price=tp_px, sl_price=sl_px,
+                    timestamp=now,
+                ),
+            )
+            order = Order(
+                symbol=sym, side=side, size_usd=pe["size_usd"], price=entry_px,
+                order_type=otype,
+                leverage=pe["leverage"], strategy=pe["strategy"],
+                signal_score=scored_proxy, timestamp=now, direction=pe["direction"],
+                tp_price=tp_px, sl_price=sl_px,
+            )
+            # current_bar=None → 브로커가 limit을 그대로 체결가로 사용(폴백 검사 생략).
+            # 우리가 위에서 이미 touch 검사를 했으므로 limit 체결이 정당.
+            try:
+                fill = self.broker.submit(order, None)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    "maker 진입 체결 실패 %s %s: %s", sym, pe["direction"], e)
+                continue
+            self.tracker.apply_fill(fill)
+            if self._fill_log is not None:
+                self._fill_log.append({
+                    "timestamp": now, "symbol": order.symbol, "strategy": order.strategy,
+                    "direction": order.direction, "entry_price": order.price,
+                    "tp_price": order.tp_price, "sl_price": order.sl_price,
+                    "sl_dist": abs(order.sl_price - order.price),
+                    "score": pe["score"], "tier": pe["tier"],
+                    "regime": regime.regime.value, "adx": regime.adx,
+                    "bb_width_pct": regime.bb_width_pct,
+                })
 
     def _record_equity(self, now: pd.Timestamp, prices: dict[str, float]) -> None:
         """equity curve + early-stop 기록 (모든 return 경로에서 호출)."""

@@ -1,0 +1,94 @@
+# 15m 모멘텀 브레이크아웃 검증 config — Scalp 벡터화 결과를 claudeTrade 엔진에서 재현.
+# 목적: 펀딩비 + 엔진 사이징/청산 같은 현실 마찰 적용 후 엣지 생존 여부 검증.
+# 사이징은 고정 티어(A)로 단순화해 전략 엣지를 격리. 펀딩/수수료/청산은 ON.
+
+backtest:
+  start: '2024-01-01'
+  end: '2026-06-09'
+  initial_capital: 100000
+
+symbols:
+- BTCUSDT
+- ETHUSDT
+- SOLUSDT
+- BNBUSDT
+- XRPUSDT
+- DOGEUSDT
+
+timeframes:
+- 15m
+
+primary_timeframe: 15m
+
+data:
+  exchange: binanceusdm
+  cache_dir: data/cache
+  lookback_bars: 60   # 15m: lookback15 + atr14 + vol20 + 여유. 60봉 = 15h 충분.
+
+strategies:
+  momentum_breakout:
+    enabled: true
+    lookback: 15
+    vol_mult: 2.5
+    vol_ma_period: 20
+    atr_period: 14
+    atr_tp_mult: 3.0
+    atr_sl_mult: 0.5
+    signal_tf: 15m
+
+# scorer 우회 — 전략 자체 검증 완결형. 고정 티어 A로 사이징.
+strategy_fixed_tier:
+  momentum_breakout: A
+
+# 8h 최대 보유 (= 32 × 15m 봉)
+strategy_max_hold_hours:
+  momentum_breakout: 8.0
+
+# 고정 사이징: 티어 A → 명목 = equity × 0.05 × 2 = equity × 0.10 (심볼당)
+# 타이트 SL(0.5×ATR) 때문에 risk-cap이 binding하지 않도록 risk_per_trade를 크게.
+leverage_tiers:
+  A:
+    leverage: 2
+    size_fraction: 0.05
+    risk_per_trade: 0.50
+
+regime:
+  adx_period: 14
+  adx_trending_threshold: 30.0
+  adx_ranging_threshold: 22.0
+  bb_period: 20
+  bb_std: 2.0
+  bb_width_lookback: 50
+  bb_width_squeeze_pct: 0.2
+  primary_tf: 15m
+
+# scorer 미사용(고정 티어)이지만 build_engine이 항상 인스턴스화 — 무해한 기본값.
+scorer:
+  volume_ratio_threshold: 1.5
+  tier_a_min_score: 99
+  tier_b_min_score: 99
+  tier_c_min_score: 99
+  tier_s_min_score: 99
+  tier_ss_min_score: 99
+
+# 가드 완화 — Scalp 벡터화는 "모든 시그널 집행"이었으므로 신호 흐름을 최대한 보존.
+# 단, 펀딩/수수료/청산(cross margin)은 그대로 ON (현실 마찰 측정 목적).
+risk:
+  max_positions: 6          # 6심볼 × 1 (심볼당 1포지션 — 엔진 강제)
+  max_same_direction: 6
+  daily_drawdown_pause: -1.0   # 사실상 비활성
+  daily_drawdown_stop: -1.0    # 사실상 비활성
+  circuit_breaker_pause_losses: 100000
+  circuit_breaker_stop_losses: 100000
+  circuit_breaker_pause_hours: 0
+  correlation_block_threshold: 1.01   # >1 → 절대 차단 안 됨
+  correlation_lookback: 100
+  tp_cooldown_hours: 0.0
+  risk_per_trade: 0.50
+  max_notional_equity_mult: 3.0
+
+execution:
+  commission_maker: 0.00005   # VIP9 maker 0.005%
+  commission_taker: 0.00017   # VIP9 taker 0.017%
+  default_slippage_bps: 1.0   # 1bp
+  funding_interval_hours: 8

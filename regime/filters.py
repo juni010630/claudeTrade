@@ -17,6 +17,8 @@ _ELIGIBLE_REGIMES: dict[str, set[MarketRegime]] = {
     "multi_tf_breakout":  {MarketRegime.TRENDING, MarketRegime.PRE_BREAKOUT},
     "funding_reversion":  _ALL_REGIMES,
     "volume_imbalance":   _ALL_REGIMES,
+    # 15m 모멘텀 브레이크아웃 (Scalp 검증 포팅) — 국면 무게이트 (Scalp 벡터화와 동일)
+    "momentum_breakout":  _ALL_REGIMES,
 }
 
 

@@ -1,0 +1,72 @@
+backtest:
+  start: '2024-01-01'
+  end: '2026-06-09'
+  initial_capital: 100000
+symbols:
+- BTCUSDT
+- ETHUSDT
+- SOLUSDT
+- BNBUSDT
+- XRPUSDT
+- DOGEUSDT
+timeframes:
+- 15m
+primary_timeframe: 15m
+data:
+  exchange: binanceusdm
+  cache_dir: data/cache
+  lookback_bars: 60
+strategies:
+  momentum_breakout:
+    enabled: true
+    lookback: 15
+    vol_mult: 2.5
+    vol_ma_period: 20
+    atr_period: 14
+    atr_tp_mult: 3.0
+    atr_sl_mult: 0.5
+    signal_tf: 15m
+strategy_fixed_tier:
+  momentum_breakout: A
+strategy_max_hold_hours:
+  momentum_breakout: 8.0
+leverage_tiers:
+  A:
+    leverage: 2
+    size_fraction: 0.05
+    risk_per_trade: 0.5
+regime:
+  adx_period: 14
+  adx_trending_threshold: 30.0
+  adx_ranging_threshold: 22.0
+  bb_period: 20
+  bb_std: 2.0
+  bb_width_lookback: 50
+  bb_width_squeeze_pct: 0.2
+  primary_tf: 15m
+scorer:
+  volume_ratio_threshold: 1.5
+  tier_a_min_score: 99
+  tier_b_min_score: 99
+  tier_c_min_score: 99
+  tier_s_min_score: 99
+  tier_ss_min_score: 99
+risk:
+  max_positions: 6
+  max_same_direction: 6
+  daily_drawdown_pause: -1.0
+  daily_drawdown_stop: -1.0
+  circuit_breaker_pause_losses: 100000
+  circuit_breaker_stop_losses: 100000
+  circuit_breaker_pause_hours: 0
+  correlation_block_threshold: 1.01
+  correlation_lookback: 100
+  tp_cooldown_hours: 0.0
+  risk_per_trade: 0.5
+  max_notional_equity_mult: 3.0
+execution:
+  commission_maker: 5.0e-05
+  commission_taker: 0.00017
+  default_slippage_bps: 1.0
+  funding_interval_hours: 8
+  backtest_maker_entry: true
