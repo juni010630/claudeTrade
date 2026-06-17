@@ -54,6 +54,8 @@ class BacktestEngine:
         position_sizer: PositionSizer | None = None,
         strategy_leverage_tiers: dict[str, dict] | None = None,  # 전략별 레버리지 티어 오버라이드
         strategy_capital_fraction: dict[str, float] | None = None,  # 전략별 사이징 기준자본 비율(단일계좌 분할)
+        capital_fraction_schedule: "pd.DataFrame | None" = None,  # 일별 시변 capital_fraction (FNG 틸트 등; None=정적). 룩업: 거래일 as-of, 래그는 스케줄에 내장(look-ahead 차단)
+        size_scale_schedule: "pd.Series | None" = None,  # 일별 글로벌 사이즈 배수 (DVOL 변동성타게팅 등; None=무변). 진입 size_usd에 곱함, 래그 내장
         sizing_pools: dict | None = None,  # 가상 서브계좌: {enabled, rebalance, pools:{name:{strategies,fraction}}}
         broker: BacktestBroker | None = None,
         funding_simulator: FundingRateSimulator | None = None,
@@ -132,6 +134,14 @@ class BacktestEngine:
                 max_notional_usd=self.sizer.max_notional_usd,
             )
         self._strategy_capital_fraction: dict[str, float] = strategy_capital_fraction or {}
+        # 일별 시변 capital_fraction 스케줄 (FNG 레짐 틸트). None이면 정적 분율(끄면 비트동일).
+        self._cap_frac_sched = capital_fraction_schedule
+        self._cap_frac_sched_idx = (capital_fraction_schedule.index
+                                    if capital_fraction_schedule is not None else None)
+        # 글로벌 사이즈 배수 스케줄 (DVOL 변동성타게팅). None이면 무변(비트동일).
+        self._size_scale_sched = size_scale_schedule
+        self._size_scale_idx = (size_scale_schedule.index
+                                if size_scale_schedule is not None else None)
         # 사이징 풀: 풀별 가상 equity로 사이징, 월 경계마다 목표 비중으로 가상 재분배
         self._pool_map: dict[str, str] = {}
         self._pool_fractions: dict[str, float] = {}
@@ -314,6 +324,37 @@ class BacktestEngine:
             return state
         from dataclasses import replace
         return replace(state, positions=pos)
+
+    def set_capital_fraction_schedule(self, sched: "pd.DataFrame | None") -> None:
+        """라이브에서 FNG 갱신 후 시변 스케줄 교체 (백테는 미사용)."""
+        self._cap_frac_sched = sched
+        self._cap_frac_sched_idx = sched.index if sched is not None else None
+
+    def set_size_scale_schedule(self, sched: "pd.Series | None") -> None:
+        """라이브에서 DVOL 갱신 후 사이즈 배수 스케줄 교체 (백테는 미사용)."""
+        self._size_scale_sched = sched
+        self._size_scale_idx = sched.index if sched is not None else None
+
+    def _size_scale_factor(self, now: pd.Timestamp) -> float:
+        """글로벌 사이즈 배수 as-of 룩업 (래그는 스케줄에 내장). 없으면 1.0."""
+        i = self._size_scale_idx.searchsorted(now, side="right") - 1
+        if i < 0:
+            return 1.0
+        v = self._size_scale_sched.iloc[i]
+        return 1.0 if pd.isna(v) else float(v)
+
+    def _tilted_cap_frac(self, strategy: str, now: pd.Timestamp) -> float:
+        """시변 스케줄에서 거래일 as-of capital_fraction 룩업. 래그는 스케줄에 내장(look-ahead 차단).
+        스케줄에 컬럼/유효값 없으면 정적 분율로 폴백."""
+        base = self._strategy_capital_fraction.get(strategy, 1.0)
+        sched = self._cap_frac_sched
+        if strategy not in sched.columns:
+            return base
+        i = self._cap_frac_sched_idx.searchsorted(now, side="right") - 1
+        if i < 0:
+            return base
+        val = sched[strategy].iloc[i]
+        return base if pd.isna(val) else float(val)
 
     # ── 시그널 덤프/리플레이 ─────────────────────────────────────
     def _generate_all_candidates(
@@ -665,11 +706,15 @@ class BacktestEngine:
             _sizer = self._strategy_sizers.get(cand["strategy"], self.sizer)
             if self._pool_map and cand["strategy"] in self._pool_map:
                 _cap_base = max(0.0, self.tracker.pool_equity(self._pool_map[cand["strategy"]]))
-            else:
+            elif self._cap_frac_sched is None:
                 _cap_base = state.equity * self._strategy_capital_fraction.get(cand["strategy"], 1.0)
+            else:
+                _cap_base = state.equity * self._tilted_cap_frac(cand["strategy"], now)
             size_usd, leverage = _sizer.calculate(
                 tier, _cap_base, cand["entry_price"], cand["sl_price"]
             )
+            if self._size_scale_sched is not None:
+                size_usd *= self._size_scale_factor(now)
             if size_usd <= 0:
                 continue
 

@@ -100,6 +100,36 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
     # ------------------------------------------------------------------
     # 체결 비용 모델
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # FNG 레짐 틸트: 일별 시변 capital_fraction 스케줄 (백테=라이브 공용)
+    # ------------------------------------------------------------------
+    cap_frac_sched = None
+    rt = p.get("regime_tilt", {})
+    if rt.get("enabled"):
+        from regime.fng_tilt import build_fng_tilt_schedule
+        cap_frac_sched = build_fng_tilt_schedule(
+            base_fractions=p.get("strategy_capital_fraction") or {},
+            fng_csv=rt.get("fng_csv", "data/regime/fng_daily.csv"),
+            delta=rt.get("delta", 0.10),
+            direction=rt.get("direction", 1),
+            momentum_strategies=rt.get("momentum_strategies", []),
+            meanrev_strategies=rt.get("meanrev_strategies", []),
+            lag_days=rt.get("lag_days", 1),
+        )
+
+    # DVOL 인버스 변동성타게팅: 일별 글로벌 사이즈 배수 스케줄 (백테=라이브 공용)
+    size_scale_sched = None
+    dv = p.get("dvol_scale", {})
+    if dv.get("enabled"):
+        from regime.dvol_scale import build_dvol_schedule
+        size_scale_sched = build_dvol_schedule(
+            dvol_path=dv.get("dvol_path", "data/regime/dvol_btc_full.parquet"),
+            target=dv.get("target", 45.0),
+            clip_lo=dv.get("clip_lo", 0.3),
+            clip_hi=dv.get("clip_hi", 2.0),
+            lag_days=dv.get("lag_days", 1),
+        )
+
     commission_model = CommissionModel(
         maker_rate=e.get("commission_maker", 0.0002),
         taker_rate=e.get("commission_taker", 0.0005),
@@ -172,6 +202,8 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         ),
         strategy_leverage_tiers=p.get("strategy_leverage_tiers"),
         strategy_capital_fraction=p.get("strategy_capital_fraction"),
+        capital_fraction_schedule=cap_frac_sched,
+        size_scale_schedule=size_scale_sched,
         sizing_pools=p.get("sizing_pools"),
         broker=broker,
         funding_simulator=FundingRateSimulator(

@@ -125,6 +125,32 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
 
     cap = initial_capital if initial_capital is not None else p.get("backtest", {}).get("initial_capital", 10_000)
 
+    # FNG 레짐 틸트: 일별 시변 capital_fraction 스케줄 (run_backtest와 동일 빌더·동일 CSV → 패리티)
+    _cap_frac_sched = None
+    _rt = p.get("regime_tilt", {})
+    if _rt.get("enabled"):
+        from regime.fng_tilt import build_fng_tilt_schedule
+        _cap_frac_sched = build_fng_tilt_schedule(
+            base_fractions=p.get("strategy_capital_fraction") or {},
+            fng_csv=_rt.get("fng_csv", "data/regime/fng_daily.csv"),
+            delta=_rt.get("delta", 0.10),
+            direction=_rt.get("direction", 1),
+            momentum_strategies=_rt.get("momentum_strategies", []),
+            meanrev_strategies=_rt.get("meanrev_strategies", []),
+            lag_days=_rt.get("lag_days", 1),
+        )
+
+    # DVOL 인버스 변동성타게팅: 글로벌 사이즈 배수 (run_backtest와 동일 빌더·데이터 → 패리티)
+    _size_scale_sched = None
+    _dv = p.get("dvol_scale", {})
+    if _dv.get("enabled"):
+        from regime.dvol_scale import build_dvol_schedule
+        _size_scale_sched = build_dvol_schedule(
+            dvol_path=_dv.get("dvol_path", "data/regime/dvol_btc_full.parquet"),
+            target=_dv.get("target", 45.0), clip_lo=_dv.get("clip_lo", 0.3),
+            clip_hi=_dv.get("clip_hi", 2.0), lag_days=_dv.get("lag_days", 1),
+        )
+
     # 피라미딩 라이브: 진입 시 STOP_MARKET 증액 주문 등록 → 체결 시 엔진이
     # 봉 high/low 트리거로 tracker 동기화 + TP/SL 총수량 재등록 (engine/backtest.py)
     # ⚠️ testnet은 STOP_MARKET -4120 차단 → 증액 주문 등록 실패 로그 발생 (포지션은 정상)
@@ -208,6 +234,8 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         ),
         strategy_leverage_tiers=p.get("strategy_leverage_tiers"),
         strategy_capital_fraction=p.get("strategy_capital_fraction"),
+        capital_fraction_schedule=_cap_frac_sched,
+        size_scale_schedule=_size_scale_sched,
         sizing_pools=p.get("sizing_pools"),
         broker=broker,
         funding_simulator=FundingRateSimulator(
@@ -456,6 +484,13 @@ def main() -> None:
     elif not demo:
         logger.info("SL poller: 비활성 (실계정은 STOP_MARKET을 거래소가 처리)")
 
+    # ── FNG 레짐 틸트: 매 봉 갱신 점검 (일 1회 실 갱신). 봇 연속실행 시 startup
+    #    스케줄이 stale되는 것 방지. enabled 아니면 완전 비활성(v18 무영향). ──
+    _rt_cfg = params.get("regime_tilt", {})
+    _fng_last_day = None
+    _dv_cfg = params.get("dvol_scale", {})
+    _dvol_last_day = None
+
     # ── 실행 루프 ──
     bar_count = 0
     deep_floor_fired = False
@@ -476,6 +511,40 @@ def main() -> None:
             for snapshot in feed.stream():
                 bar_count += 1
                 logger.info("─── 봉 #%d | %s ───", bar_count, snapshot.timestamp)
+
+                # FNG 레짐 틸트: UTC 일 경계마다 FNG 증분갱신 + 스케줄 재빌드
+                # (1일 래그로 look-ahead 차단. 백테 빌더와 동일 함수 → 패리티)
+                if _rt_cfg.get("enabled"):
+                    _today = snapshot.timestamp.strftime("%Y-%m-%d")
+                    if _today != _fng_last_day:
+                        from regime.fng_tilt import build_fng_tilt_schedule, refresh_fng_csv
+                        _fcsv = _rt_cfg.get("fng_csv", "data/regime/fng_daily.csv")
+                        _ok = refresh_fng_csv(_fcsv)
+                        with engine_lock:
+                            engine.set_capital_fraction_schedule(build_fng_tilt_schedule(
+                                base_fractions=params.get("strategy_capital_fraction") or {},
+                                fng_csv=_fcsv, delta=_rt_cfg.get("delta", 0.10),
+                                direction=_rt_cfg.get("direction", 1),
+                                momentum_strategies=_rt_cfg.get("momentum_strategies", []),
+                                meanrev_strategies=_rt_cfg.get("meanrev_strategies", []),
+                                lag_days=_rt_cfg.get("lag_days", 1)))
+                        _fng_last_day = _today
+                        logger.info("FNG 스케줄 갱신 (%s, fetch=%s, 1일 래그)", _today, _ok)
+
+                # DVOL 변동성타게팅: UTC 일 경계마다 DVOL 증분갱신 + 사이즈배수 재빌드 (1일 래그)
+                if _dv_cfg.get("enabled"):
+                    _today2 = snapshot.timestamp.strftime("%Y-%m-%d")
+                    if _today2 != _dvol_last_day:
+                        from regime.dvol_scale import build_dvol_schedule, refresh_dvol_parquet
+                        _dpath = _dv_cfg.get("dvol_path", "data/regime/dvol_btc_full.parquet")
+                        _ok2 = refresh_dvol_parquet(_dpath)
+                        with engine_lock:
+                            engine.set_size_scale_schedule(build_dvol_schedule(
+                                dvol_path=_dpath, target=_dv_cfg.get("target", 45.0),
+                                clip_lo=_dv_cfg.get("clip_lo", 0.3), clip_hi=_dv_cfg.get("clip_hi", 2.0),
+                                lag_days=_dv_cfg.get("lag_days", 1)))
+                        _dvol_last_day = _today2
+                        logger.info("DVOL 스케줄 갱신 (%s, fetch=%s, 1일 래그)", _today2, _ok2)
 
                 # stale 데이터 방어: snapshot이 2봉 이상 지연이면 이 봉 전체를 건너뜀
                 # (진입·청산·MTM 모두 미처리 — stale 가격에 행동하지 않음). 메인넷은
