@@ -410,7 +410,7 @@ strategy_guard_isolated:
 dvol_scale:
   enabled: true
   dvol_path: data/regime/dvol_btc_full.parquet
-  target: 55.0          # MDD 다이얼 (낮을수록 디레버↑·MDD↓·수익↓; Sharpe는 무관 robust)
+  target: 45.0          # MDD 다이얼 (낮을수록 디레버↑·MDD↓·수익↓; Sharpe는 무관 robust)
   clip_lo: 0.3
   clip_hi: 2.0
   lag_days: 1           # DVOL[D-1] (look-ahead 차단)
