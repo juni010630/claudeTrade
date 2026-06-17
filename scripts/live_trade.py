@@ -151,6 +151,17 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
             clip_hi=_dv.get("clip_hi", 2.0), lag_days=_dv.get("lag_days", 1),
         )
 
+    # DVOL 책별 차등 (per-book) → capital_fraction_schedule (run_backtest와 동일 빌더 → 패리티)
+    _dvp = p.get("dvol_perbook", {})
+    if _dvp.get("enabled"):
+        from regime.dvol_scale import build_dvol_perbook_schedule
+        _cap_frac_sched = build_dvol_perbook_schedule(
+            base_fractions=p.get("strategy_capital_fraction") or {},
+            dvol_path=_dvp.get("dvol_path", "data/regime/dvol_btc_full.parquet"),
+            targets=_dvp.get("targets", {}), clip_lo=_dvp.get("clip_lo", 0.3),
+            clip_hi=_dvp.get("clip_hi", 2.0), lag_days=_dvp.get("lag_days", 1),
+        )
+
     # 피라미딩 라이브: 진입 시 STOP_MARKET 증액 주문 등록 → 체결 시 엔진이
     # 봉 high/low 트리거로 tracker 동기화 + TP/SL 총수량 재등록 (engine/backtest.py)
     # ⚠️ testnet은 STOP_MARKET -4120 차단 → 증액 주문 등록 실패 로그 발생 (포지션은 정상)
@@ -490,6 +501,8 @@ def main() -> None:
     _fng_last_day = None
     _dv_cfg = params.get("dvol_scale", {})
     _dvol_last_day = None
+    _dvp_cfg = params.get("dvol_perbook", {})
+    _dvp_last_day = None
 
     # ── 실행 루프 ──
     bar_count = 0
@@ -545,6 +558,22 @@ def main() -> None:
                                 lag_days=_dv_cfg.get("lag_days", 1)))
                         _dvol_last_day = _today2
                         logger.info("DVOL 스케줄 갱신 (%s, fetch=%s, 1일 래그)", _today2, _ok2)
+
+                # DVOL per-book: 일 경계마다 DVOL 갱신 + 책별 capital_fraction_schedule 재빌드
+                if _dvp_cfg.get("enabled"):
+                    _today3 = snapshot.timestamp.strftime("%Y-%m-%d")
+                    if _today3 != _dvp_last_day:
+                        from regime.dvol_scale import build_dvol_perbook_schedule, refresh_dvol_parquet
+                        _dpath3 = _dvp_cfg.get("dvol_path", "data/regime/dvol_btc_full.parquet")
+                        _ok3 = refresh_dvol_parquet(_dpath3)
+                        with engine_lock:
+                            engine.set_capital_fraction_schedule(build_dvol_perbook_schedule(
+                                base_fractions=params.get("strategy_capital_fraction") or {},
+                                dvol_path=_dpath3, targets=_dvp_cfg.get("targets", {}),
+                                clip_lo=_dvp_cfg.get("clip_lo", 0.3), clip_hi=_dvp_cfg.get("clip_hi", 2.0),
+                                lag_days=_dvp_cfg.get("lag_days", 1)))
+                        _dvp_last_day = _today3
+                        logger.info("DVOL per-book 스케줄 갱신 (%s, fetch=%s, 1일 래그)", _today3, _ok3)
 
                 # stale 데이터 방어: snapshot이 2봉 이상 지연이면 이 봉 전체를 건너뜀
                 # (진입·청산·MTM 모두 미처리 — stale 가격에 행동하지 않음). 메인넷은

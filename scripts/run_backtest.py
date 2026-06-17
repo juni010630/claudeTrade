@@ -130,6 +130,18 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
             lag_days=dv.get("lag_days", 1),
         )
 
+    # DVOL 책별 차등 변동성타게팅 (per-book): capital_fraction_schedule 경로 (글로벌 size_scale 대신)
+    dvp = p.get("dvol_perbook", {})
+    if dvp.get("enabled"):
+        from regime.dvol_scale import build_dvol_perbook_schedule
+        cap_frac_sched = build_dvol_perbook_schedule(
+            base_fractions=p.get("strategy_capital_fraction") or {},
+            dvol_path=dvp.get("dvol_path", "data/regime/dvol_btc_full.parquet"),
+            targets=dvp.get("targets", {}),
+            clip_lo=dvp.get("clip_lo", 0.3), clip_hi=dvp.get("clip_hi", 2.0),
+            lag_days=dvp.get("lag_days", 1),
+        )
+
     commission_model = CommissionModel(
         maker_rate=e.get("commission_maker", 0.0002),
         taker_rate=e.get("commission_taker", 0.0005),

@@ -21,6 +21,23 @@ def build_dvol_schedule(dvol_path: str, target: float, clip_lo: float, clip_hi: 
     return (target / dvol.shift(lag_days)).clip(clip_lo, clip_hi).dropna()
 
 
+def build_dvol_perbook_schedule(base_fractions: dict, dvol_path: str, targets: dict,
+                                clip_lo: float, clip_hi: float, lag_days: int = 1) -> "pd.DataFrame":
+    """책별 DVOL 차등 capital_fraction 스케줄 (추세 공격적·MR/macross 완만).
+    각 전략 분율 = base × clip(target[strat]/DVOL[D-lag], lo, hi). 1일 래그=look-ahead 차단.
+    파일 부재 시 자동 fetch(배포 견고성)."""
+    from pathlib import Path
+    if not Path(dvol_path).exists():
+        refresh_dvol_parquet(dvol_path)
+    dvol = pd.read_parquet(dvol_path)["dvol_btc"]
+    dvol.index = pd.to_datetime(dvol.index, utc=True)
+    cols = {}
+    for strat, bf in base_fractions.items():
+        t = float(targets.get(strat, 50.0))
+        cols[strat] = bf * (t / dvol.shift(lag_days)).clip(clip_lo, clip_hi)
+    return pd.DataFrame(cols).dropna(how="all")
+
+
 def refresh_dvol_parquet(path: str = "data/regime/dvol_btc_full.parquet") -> bool:
     """Deribit에서 최신 BTC DVOL을 증분 병합 (라이브 일일 갱신용).
     실패 시 기존 유지·False (네트워크 일시장애에 봇 중단 금지)."""
