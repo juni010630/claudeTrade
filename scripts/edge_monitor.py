@@ -47,12 +47,12 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("edge_monitor")
 
 # ── 기준점 (재배포 시 갱신) ───────────────────────────────────────
-ANCHOR = pd.Timestamp("2026-06-09", tz="UTC")  # 현 보유 포지션 최고참(LTC/ARPA 06-10) 이전 →
-#   리플레이가 라이브와 같은 포지션을 들고 시작(미보유 시 06-12 재시그널을 '리플레이전용' 오경보).
-#   06-09(v17 배포일)부터면 공통전략(ema/multi/mean_rev)은 v17=v18 동일, macross_d는 06-12까지 무신호라
-#   v18 리플레이가 라이브 5진입을 5/5 정확 재현(2026-06-13 검증). 보유분 전부 청산 후 클린 자정으로 재앵커 권장.
-CONFIG = "config/final_v20_dvol_perbook.yaml"   # 2026-06-17 v20 배포 (per-book DVOL t50, 공격)
-BASELINE = "config/edge_baseline_v20.json"  # 생성 전엔 ③ 자동 스킵 (31일 누적 후 발동)
+ANCHOR = pd.Timestamp("2026-06-19", tz="UTC")  # ⚠️ v21b 배포 앵커 — 실제 재시작일로 갱신.
+#   v21b = v20 + 볼륨 확인 바만(multi vol1.8→2.0, scorer vol_thr1.8→2.0). 사이징·배분 불변,
+#   신호변화는 볼륨필터로 일부 진입만 차이 → 전환윈도 소수 '리플레이/라이브전용' 오경보 가능(무시).
+#   배포일=ANCHOR로 맞추면 충분(보유분 청산 불필수).
+CONFIG = "config/final_v21b_vol.yaml"   # 2026-06-19 v21b 배포 (볼륨필터: multi vol2.0 + scorer vol_thr2.0)
+BASELINE = "config/edge_baseline_v21b.json"  # 생성 전엔 ③ 자동 스킵 (31일 누적 후 발동)
 # replay 시작 자본: 신호/슬리피지 패리티엔 무관(포지션 사이즈만 스케일하고, ③ 롤링은
 # 실잔고 로그를 씀) → 정밀값 불필요. main에서 라이브 잔고를 API로 긁어 쓰고,
 # 못 긁으면(--no-balance/조회 실패) 이 폴백 사용.
