@@ -229,7 +229,14 @@ cmax = 배분 + MR TP4.0 + 슬리브t60 + multi vol2.0 + scorer vol2.0.
 minor: scorer daily_ema150(2023+51 marginal)·rsi_long_max65(Sh2.01/MDD불변 marginal)·corr_lookback150(Sharpe↑/MDD↑ 트레이드오프) · **ss_lev30·funding gate=죽은노브**.
 **cmax 강건성(결정적):** vol 1.9/2.0/2.1 → Sh 2.254/2.299/2.204 (전부 ~2.25, MDD~-24~-27, 2023+41~55) + scorer1.9=2.279. **= 스택은 정확값에 강건(2.0 스파이크는 스택 안에서 무의미)=과적합 아님.**
 
-## ✅ 캠페인 종결 (14 wave/~155변형, config screw-space 완전 소진)
-**최종 권고 = research/screw_sweep/FINDINGS.md.** 강건 개선 = "노출을 MR 슬리브로 + 품질필터 올리기":
+## WAVE 15-17 — 루프 연장 (대표본 분기 분해 + 스택)
+- **17분기 승률 랭킹:** cmax 9/17·최근1/4(불장드래그), mr_tp40 14/17이나 최근1/4(regime decay) → 둘 다 강등. **볼륨필터 13/17·최근4/4=강건.** corr_lookback150 11/17·최근4/4(의외).
+- **v21b+corr_lookback150 스택 = 진짜 개선:** corr150 단독은 MDD악화(-28.9)였으나 볼륨필터와 스택 시 **MDD 개선**(-23.2일/-25.89봉). smoothness 통과(corr 100→200 Sharpe 단조↑, 150이 MDD·최근4/4 스위트스팟), **IS/OOS 통과(OOS 3.527>v21b 3.239>base 3.205=OOS-better!)**, 14/17분기·최근4/4. 봉MDD baseline -29.96→**-25.89**(실개선).
+- de150은 2023+94이나 분기 12/17로 덜 강건 → 보류.
+
+## ✅ 최종 배포 = v21c (config/final_v21c_volcorr.yaml) — 2026-06-19 배포승인
+v20 + 3변경: multi volume_multiplier 1.8→2.0, scorer volume_ratio_threshold 1.8→2.0, risk correlation_lookback 100→150.
+전구간 Sharpe(일)2.139→**2.251**/봉MDD-29.96→**-25.89**/2023+14→**+42**/총수익+4716%→**+9550%**(2배)/IS1.553·**OOS3.527**/분기14·17/최근OOS+39%. 패리티 검증완료(3키 live build_engine 배선). edge_monitor·baseline v21c 갱신.
+**최종 권고 상세 = research/screw_sweep/FINDINGS.md.** 강건 개선 = "노출을 MR 슬리브로 + 품질필터 올리기":
 배분 50:25:25→40:30:30 · MR TP3.0→4.0 · 슬리브 DVOL t55→60 · multi vol1.8→~2.0 · scorer vol1.8→2.0.
 cmax4030: Sh1.962→2.299 / MDD-26.9→-24.3 / 2023+14→+54 / 전연도 우월 / **25bps서도 2023+5 생존**(baseline 15bps 사망). 미배포(사용자 결정).
