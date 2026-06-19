@@ -145,6 +145,28 @@ class LiveFeed:
             funding[sym] = self._fetch_funding(sym)
             time.sleep(self.exchange.rateLimit / 1000 * 0.5)
 
+        # 심볼별 staleness 방어: 한 심볼의 primary_tf 최신 완성봉이 snap_ts보다 1봉
+        # 이상 뒤처지면(15회 재시도 실패로 stale fetch) 그 심볼을 snapshot에서 제외 —
+        # stale 가격에 신호/MTM이 작동하지 않게 한다. 전역 snapshot staleness는
+        # live_trade가 별도(7200s)로 가드하지만, 그 기준 타임스탬프는 첫(fresh) 심볼에서
+        # 와서 단일 심볼 지연은 못 잡으므로 여기서 심볼 단위로 차단한다.
+        if snap_ts is not None:
+            pf = self.primary_tf
+            pf_mins = self.TF_MINS.get(pf, 60)
+            tol = pd.Timedelta(minutes=pf_mins)
+            for sym in list(bars.keys()):
+                pdf = bars[sym].get(pf)
+                if pdf is None or len(pdf) == 0:
+                    continue
+                pf_close = pdf["timestamp"].iloc[-1] + pd.Timedelta(minutes=pf_mins)
+                if snap_ts - pf_close > tol:
+                    logger.warning(
+                        "심볼 stale 제외: %s primary 최신봉 close=%s vs snap=%s",
+                        sym, pf_close, snap_ts,
+                    )
+                    bars.pop(sym, None)
+                    funding.pop(sym, None)
+
         # 폴백: 타임스탬프를 결정 못한 경우 현재 시각 floor
         if snap_ts is None:
             snap_ts = pd.Timestamp.now(tz="UTC").floor(

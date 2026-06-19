@@ -38,6 +38,8 @@ class SLPoller:
         self.lock = lock or threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # 심볼별 마지막으로 검사한 완성봉 open_time — 폴 간격 드리프트로 봉을 건너뛰지 않도록.
+        self._last_seen: dict[str, pd.Timestamp] = {}
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True, name="sl-poller")
@@ -64,26 +66,41 @@ class SLPoller:
                 self._stop.wait(30)
 
     def check_once(self) -> None:
-        """모든 열린 포지션에 대해 직전 5m 봉 high/low로 SL 터치 체크."""
+        """모든 열린 포지션에 대해 마지막 폴 이후 마감된 5m 봉들의 high/low로 SL 터치 체크.
+
+        폴 간격(300s)이 check_once 소요시간만큼 5m 그리드 대비 드리프트하므로, 한 폴에
+        2개 이상 봉이 마감될 수 있다. 직전 1봉만 보면 그 사이 봉의 SL 터치를 놓친다 →
+        last_seen 이후의 모든 완성봉을 검사(extreme low/high 집계)해 누락을 방지한다.
+        """
         with self.lock:
             state = self.engine.tracker.snapshot()
             syms = list(state.positions.keys())
         if not syms:
             return
 
+        now = pd.Timestamp.now(tz="UTC")
+        tf_delta = pd.Timedelta(self.tf)
         for sym in syms:
             try:
-                ohlcv = self.exchange.fetch_ohlcv(sym, self.tf, limit=3)
+                ohlcv = self.exchange.fetch_ohlcv(sym, self.tf, limit=5)
             except Exception as e:
                 logger.warning("SL poller OHLCV 실패 %s: %s", sym, e)
                 continue
             if not ohlcv:
                 continue
-            # 마지막 완성봉: 마지막이 미완성이면 두 번째부터
-            # 보수적으로 뒤에서 두 번째 사용 (완전히 마감된 봉)
-            last = ohlcv[-2] if len(ohlcv) >= 2 else ohlcv[-1]
-            ts_ms, o, h, l, c, v = last
-            bar_ts = pd.Timestamp(ts_ms, unit="ms", tz="UTC")
+            # last_seen 이후의 완성봉만 수집 (forming 봉 = close_time이 미래 → 제외)
+            last_seen = self._last_seen.get(sym)
+            new_bars = []  # (bar_ts, high, low)
+            for ts_ms, o, h, l, c, v in ohlcv:
+                bar_ts = pd.Timestamp(ts_ms, unit="ms", tz="UTC")
+                if bar_ts + tf_delta > now:
+                    continue  # 미마감(forming) 봉
+                if last_seen is not None and bar_ts <= last_seen:
+                    continue  # 이미 검사한 봉
+                new_bars.append((bar_ts, float(h), float(l)))
+            if not new_bars:
+                continue
+            self._last_seen[sym] = new_bars[-1][0]
 
             # lock 내에서 SL 히트 여부만 판단, 네트워크 호출은 밖에서
             close_info = None
@@ -92,13 +109,16 @@ class SLPoller:
                 pos = st.positions.get(sym)
                 if pos is None:
                     continue
-                # 진입 직후 같은 봉이면 SL 체크 건너뜀 (같은 봉 noise)
-                if bar_ts <= pos.opened_at:
+                # 진입 봉 이후의 완성봉만 (같은 봉 noise 제외)
+                relevant = [(h, l) for (bts, h, l) in new_bars if bts > pos.opened_at]
+                if not relevant:
                     continue
+                bar_h = max(h for h, l in relevant)
+                bar_l = min(l for h, l in relevant)
 
                 sl = float(pos.sl_price)
-                hit_sl = (pos.direction == "long" and float(l) <= sl) or \
-                         (pos.direction == "short" and float(h) >= sl)
+                hit_sl = (pos.direction == "long" and bar_l <= sl) or \
+                         (pos.direction == "short" and bar_h >= sl)
                 if not hit_sl:
                     continue
 
@@ -110,7 +130,7 @@ class SLPoller:
                     "entry_price": pos.entry_price,
                     "strategy": pos.strategy,
                     "confluence_score": pos.confluence_score,
-                    "bar_l": float(l), "bar_h": float(h),
+                    "bar_l": bar_l, "bar_h": bar_h,
                 }
 
             if close_info is None:
@@ -171,9 +191,12 @@ class SLPoller:
                     commission=commission,
                     slippage_cost=slip,
                 )
-                # circuit breaker 기록
+                # circuit breaker 기록 — 격리 북(macross_d 등)은 제외(엔진 본경로와 동일
+                # 규칙: 격리 북 손익이 글로벌 CB 카운터를 오염시켜 추세/슬리브 게이팅을
+                # 잘못 트립/리셋하는 것 방지).
                 last_trade = self.engine.ledger._records[-1] if self.engine.ledger._records else None
-                if last_trade is not None:
+                if (last_trade is not None
+                        and close_info["strategy"] not in self.engine._strategy_guard_isolated):
                     self.engine.circuit_breaker.record_result(
                         close_info["strategy"], last_trade.pnl > 0
                     )

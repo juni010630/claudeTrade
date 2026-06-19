@@ -181,7 +181,11 @@ class LiveBroker:
             while time.time() < deadline:
                 time.sleep(self._maker_poll)
                 status, filled, avg = _status()
-                if status == "closed" or filled >= qty * 0.999:
+                # 전량 판정은 status=="closed"만 인정 — 99.9% 체결·미종결로 조기 반환하면
+                # 잔여 ~0.1% 지정가(reduceOnly 아님)가 고아로 남고, sync는 닫힌 포지션만
+                # 정리하므로 영구 표류(_try_maker_close와 동일 규칙). 미종결이면 계속 대기 →
+                # 타임아웃 취소 경로가 잔량을 시장가로 정리한다.
+                if status == "closed":
                     logger.info("maker 전량 체결: %s @%.6g", symbol, avg)
                     return {"average": avg, "qty": filled if filled > 0 else qty}
                 if status in ("canceled", "expired", "rejected"):
@@ -308,9 +312,27 @@ class LiveBroker:
                     try:
                         if symbol in self.fetch_open_symbols():
                             logger.info("네트워크 오류지만 포지션 존재 확인 — 체결된 것으로 간주: %s", symbol)
-                            trades = self.exchange.fetch_my_trades(symbol, limit=3)
-                            if trades:
-                                result = {"average": float(trades[-1]["price"]), "fee": trades[-1].get("fee")}
+                            # 포지션이 실재하면 result를 절대 None으로 두지 않는다 — None이면
+                            # 아래 raise→호출자 스킵→SL/TP 없는 고아 포지션이 남는다.
+                            # 체결가: 체결내역 → 포지션 평단 → 의도가 순으로 폴백.
+                            avg_px = None
+                            try:
+                                trades = self.exchange.fetch_my_trades(symbol, limit=3)
+                                if trades:
+                                    avg_px = float(trades[-1]["price"])
+                                    result = {"average": avg_px, "fee": trades[-1].get("fee")}
+                            except Exception:
+                                pass
+                            if avg_px is None:
+                                ep = None
+                                try:
+                                    for pp in self.exchange.fetch_positions([symbol]):
+                                        if float(pp.get("contracts") or 0) != 0:
+                                            ep = float(pp.get("entryPrice") or 0) or None
+                                            break
+                                except Exception:
+                                    pass
+                                result = {"average": ep if ep else price}
                             break
                     except Exception:
                         pass

@@ -1,6 +1,7 @@
 """멀티 심볼/타임프레임 DataLoader — MarketSnapshot 이터레이터."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Iterator
 
@@ -9,6 +10,8 @@ import pandas as pd
 
 from data.cache import ParquetCache
 from data.schemas import MarketSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 class DataLoader:
@@ -65,6 +68,31 @@ class DataLoader:
         # (sym, tf)별 직전 윈도 캐시 — 같은 (start, end) 구간이면 프레임 재사용 (4h/1d는 봉 간 대부분 동일).
         # 스냅샷 프레임은 전 소비자 read-only (변형 없음 확인) → 내용 비트동일.
         self._win_cache: dict[tuple[str, str], tuple[int, int, pd.DataFrame]] = {}
+
+        self._warn_data_gaps()
+
+    def _warn_data_gaps(self, max_factor: float = 3.0) -> None:
+        """캐시 내부의 큰 시간 공백 1회 경고. 위치기반 슬라이싱은 갭을 사이에 둔
+        비인접 봉을 연속으로 제시(지표 오염) + 갭 구간엔 stale 봉이 현재가로 쓰임.
+        엔진 _get_bars는 stale 봉을 제외하지만, 갭 자체는 데이터 백필로 해소해야 함."""
+        gapped = []
+        for sym in self.symbols:
+            tf = self.primary_tf
+            idx = self._ohlcv[sym][tf].index
+            if len(idx) < 2:
+                continue
+            diffs = idx.to_series().diff()
+            big = diffs[diffs > pd.Timedelta(tf) * max_factor]
+            if len(big):
+                gapped.append((sym, big.max(), big.idxmax()))
+        if gapped:
+            worst = max(gapped, key=lambda x: x[1])
+            logger.warning(
+                "데이터 갭 감지: %d/%d 심볼 %s 캐시에 내부 공백 — 최악 %s (%s 직전, ~%s). "
+                "갭 구간을 지나는 백테는 stale 가격/지표 오염 위험 → fetch_data.py 백필 권장.",
+                len(gapped), len(self.symbols), self.primary_tf,
+                worst[1], worst[0], worst[2],
+            )
 
     def iterate(
         self,

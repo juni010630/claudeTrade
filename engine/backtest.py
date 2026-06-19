@@ -264,15 +264,28 @@ class BacktestEngine:
             return self._tier_table.mm_rate(symbol, notional)
         return self._mm_rate
 
+    _STALE_TOLERANCE = pd.Timedelta(days=2)
+
     def _get_bars(self, snapshot: MarketSnapshot) -> dict[str, pd.Series]:
-        """설정된 price_tf 기준으로 현재 OHLC bar 추출. 없으면 폴백."""
+        """설정된 price_tf 기준으로 현재 OHLC bar 추출. 없으면 폴백.
+
+        데이터 갭 방어: 선택된 봉의 close_time이 snapshot.timestamp보다 2일 이상
+        뒤처지면(캐시 갭/상폐로 stale) 그 심볼을 제외한다 — stale 가격으로 MTM/체결/
+        펀딩/상관을 갱신하면 가짜 체결·equity 왜곡 발생(라이브엔 없는 현상). 정상
+        연속 데이터에선 close_time == snapshot.timestamp(diff 0)라 무영향.
+        """
         bars: dict[str, pd.Series] = {}
         fallback_order = [self.price_tf, "5m", "15m", "1h", "4h", "1d"]
+        snap_ts = snapshot.timestamp
         for sym in snapshot.bars:
             for tf in fallback_order:
                 df = snapshot.bars[sym].get(tf)
                 if df is not None and not df.empty:
-                    bars[sym] = df.iloc[-1]
+                    row = df.iloc[-1]
+                    close_time = row["timestamp"] + pd.Timedelta(tf)
+                    if snap_ts - close_time > self._STALE_TOLERANCE:
+                        break  # stale — 이 심볼 제외(갭은 전 TF 공통이라 폴백 무의미)
+                    bars[sym] = row
                     break
         return bars
 
@@ -990,13 +1003,15 @@ class BacktestEngine:
         state = self.tracker.snapshot()
         self.equity_curve.append(now, state.equity, state.open_position_count)
         self._equity_history.append(state.equity)
-        if self._abort_mdd is not None:
-            if state.equity > self._peak_equity:
-                self._peak_equity = state.equity
-            if self._peak_equity > 0:
-                dd = (state.equity - self._peak_equity) / self._peak_equity
-                if dd <= self._abort_mdd:
-                    self._aborted = True
+        # peak는 항상 추적 — state_store가 peak를 항상 저장/복원하므로, deep_floor
+        # 비활성 기간에 peak를 동결시키면(옛 동작) 재활성 시 진짜 고점이 아닌
+        # initial_capital에 -55% 기준이 앵커돼 보호가 헐거워진다. abort 판정만 게이팅.
+        if state.equity > self._peak_equity:
+            self._peak_equity = state.equity
+        if self._abort_mdd is not None and self._peak_equity > 0:
+            dd = (state.equity - self._peak_equity) / self._peak_equity
+            if dd <= self._abort_mdd:
+                self._aborted = True
 
     # ── sub-bar 통합 TP/SL + trailing ─────────────────────────────
     _TF_MINUTES = {"5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
@@ -1321,7 +1336,7 @@ class BacktestEngine:
                 'timestamp': snapshot.timestamp,
             })()
             if rev_size > 0 and self.guards.is_entry_allowed(
-                self.tracker.snapshot(), _rev_sig
+                self._state_excluding_isolated(self.tracker.snapshot()), _rev_sig
             ):
                 rev_order = Order(
                     symbol=sym, side=rev_side, size_usd=rev_size,
@@ -1361,7 +1376,7 @@ class BacktestEngine:
                 'timestamp': snapshot.timestamp,
             })()
             if rev_size > 0 and self.guards.is_entry_allowed(
-                self.tracker.snapshot(), _rev_sig
+                self._state_excluding_isolated(self.tracker.snapshot()), _rev_sig
             ):
                 rev_order = Order(
                     symbol=sym, side=rev_side, size_usd=rev_size,

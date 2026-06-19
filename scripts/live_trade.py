@@ -46,6 +46,7 @@ from signals.scorer import ConfluenceScorer
 from strategies.ema_cross import EMACrossStrategy
 from strategies.ema_slow_daily import EmaSlowDailyStrategy
 from strategies.mean_reversion import MeanReversionStrategy
+from strategies.momentum_breakout import MomentumBreakoutStrategy
 from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
 
 # ── 로깅 ──────────────────────────────────────────────────────────
@@ -106,12 +107,16 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
     rg         = p.get("regime", {})
     sc         = p.get("scorer", {})
 
+    # ⚠️ run_backtest.build_engine의 strategy_map과 키 집합이 정확히 일치해야 함
+    # (백테=라이브 절대규칙). 누락 시 백테는 거래·라이브는 조용히 스킵 → 불일치.
+    # (hammer_vol은 strategies/hammer_vol.py가 미커밋이라 양쪽 모두 미등록 — 커밋 시 동반 추가할 것)
     strategy_map = {
         "ema_cross":          EMACrossStrategy,
         "ema_cross_slow":     EMACrossStrategy,   # 다중 속도 변형 (strategy_name으로 구분)
         "multi_tf_breakout":  MultiTFBreakoutStrategy,
         "mean_reversion":     MeanReversionStrategy,
         "macross_d":          EmaSlowDailyStrategy,  # 1d 슬로우 크로스 (NEWEDGE_GREEDY_RESULTS.md)
+        "momentum_breakout":  MomentumBreakoutStrategy,  # 15m 모멘텀 (Scalp 검증 포팅)
     }
     strategies = []
     for key, cls in strategy_map.items():
@@ -386,6 +391,25 @@ def main() -> None:
         if not dry_run:
             sys.exit(1)
 
+    # 시계오차 가드: 로컬 시계가 거래소보다 >30s 앞서면 forming(미마감) 봉을
+    # 완성봉으로 오인할 수 있음(live_feed forming-bar drop이 로컬 now 기준 → 약한
+    # look-ahead). 시작 시 1회 점검만; NTP 동기 서버면 통과.
+    try:
+        _srv_ms = exchange.fetch_time()
+        _skew = (time.time() * 1000) - float(_srv_ms)
+        if abs(_skew) > 30_000:
+            msg = f"⚠️ 시계오차 {_skew/1000:+.1f}s (로컬 vs 거래소) — NTP 동기 필요. forming 봉 오인 위험."
+            logger.critical(msg)
+            if notifier and notifier.enabled:
+                try:
+                    notifier.notify_info(msg)
+                except Exception:
+                    pass
+        else:
+            logger.info("시계오차 점검 OK (%.1fs)", _skew / 1000)
+    except Exception as e:
+        logger.warning("시계오차 점검 실패(무시): %s", e)
+
     # 엔진 생성 — 실제 잔고를 초기 자본으로 주입 (백테스트 값 무시)
     engine = build_engine(params, broker, notifier=notifier, initial_capital=usdt)
     broker.equity_provider = lambda: engine.tracker.snapshot().equity
@@ -595,10 +619,27 @@ def main() -> None:
                     dd = (state.equity - peak) / peak * 100 if peak > 0 else 0.0
                     logger.error("⛔ 딥플로어 발동: equity %.2f / peak %.2f (DD %+.1f%%)",
                                  state.equity, peak, dd)
-                    DEEP_FLOOR_HALT.write_text(json.dumps({
+                    # 쓰기 실패(디스크 풀/권한)가 청산·정지를 막으면 안 됨 — 예외를
+                    # 삼키고 청산+break는 반드시 진행(이 프로세스는 확실히 멈춤). 재기동
+                    # 시 파일 부재로 거래 재개될 극단 케이스 방지용으로 3회 재시도.
+                    _halt_payload = json.dumps({
                         "triggered_at": snapshot.timestamp.isoformat(),
                         "equity": state.equity, "peak": peak, "dd_pct": dd,
-                    }, indent=2))
+                    }, indent=2)
+                    for _w in range(3):
+                        try:
+                            DEEP_FLOOR_HALT.write_text(_halt_payload)
+                            break
+                        except Exception as _we:
+                            logger.critical("딥플로어 halt 파일 쓰기 실패 (%d/3): %s", _w + 1, _we)
+                            if notifier and notifier.enabled and _w == 2:
+                                try:
+                                    notifier.notify_info(
+                                        "🚨 딥플로어 halt 파일 쓰기 실패 — 청산은 진행하나 "
+                                        "재기동 시 거래 재개 위험. 수동 확인 필요."
+                                    )
+                                except Exception:
+                                    pass
                     with engine_lock:
                         prices = engine._get_prices(snapshot)
                         for sym in list(state.positions.keys()):

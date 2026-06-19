@@ -274,15 +274,23 @@ def rolling_percentiles() -> list[str]:
     """30d/90d 라이브 수익률 → 백테 분포 백분위. 표본 부족 시 빈 리스트."""
     if not EQUITY_LOG.exists() or not Path(BASELINE).exists():
         return []
-    eq = pd.read_csv(EQUITY_LOG, parse_dates=["date"])
+    eq = pd.read_csv(EQUITY_LOG, parse_dates=["date"]).sort_values("date").reset_index(drop=True)
     if len(eq) < 31:
         return [f"③ 롤링: 표본 {len(eq)}/31일 — 누적 중"]
     grids = json.loads(Path(BASELINE).read_text())["grids"]
+    last_date = eq["date"].iloc[-1]
+    last_eq = eq["equity"].iloc[-1]
     out = []
     for name, days in (("30d", 30), ("90d", 90)):
-        if len(eq) < days + 1:
-            continue
-        ret = eq["equity"].iloc[-1] / eq["equity"].iloc[-(days + 1)] - 1
+        # 행 위치가 아닌 '날짜 기준' lookback — 로그에 결손일(잔고조회 실패/서버 다운/
+        # --no-balance)이 섞이면 positional iloc은 30/90일보다 더 과거를 참조해
+        # 수익률·백분위가 왜곡된다(baseline은 연속 1h봉 기준이라 호라이즌 불일치).
+        target = last_date - pd.Timedelta(days=days)
+        prior = eq[eq["date"] <= target]
+        if prior.empty:
+            continue  # 아직 days일 치 히스토리 없음
+        base_eq = prior["equity"].iloc[-1]
+        ret = last_eq / base_eq - 1
         g = grids[f"ret_{name}"]
         pctl = float(np.interp(ret, g["values"], g["percentiles"]))
         flag = " 🚨ALERT" if pctl < PCTL_ALERT else ""
