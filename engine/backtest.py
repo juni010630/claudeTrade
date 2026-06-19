@@ -1739,9 +1739,11 @@ class BacktestEngine:
             slippage_cost=self._slippage.cost(pos.size_usd / pos.entry_price * price, OrderType.MARKET),
         )
 
-        # forced_stop(일일 DD)은 전략 손실로 circuit_breaker에 기록.
-        # liquidation은 계정 전반 이벤트라 특정 전략 귀속 부적절 → 미기록.
-        if reason == "forced_stop" and pos.strategy not in self._strategy_guard_isolated:
+        # forced_stop(일일 DD)·early_exit(반대신호 조기청산)은 전략 손익으로 circuit_breaker에
+        # 기록 — 다른 비격리 청산(TP/SL/timeout/sync)과 동일한 연속손절 차단 패리티.
+        # liquidation/deep_floor은 계정 전반 이벤트라 특정 전략 귀속 부적절 → 미기록.
+        # 격리 북(macross_d)은 글로벌 CB 면제 유지.
+        if reason in ("forced_stop", "early_exit") and pos.strategy not in self._strategy_guard_isolated:
             last = self.ledger._records[-1] if self.ledger._records else None
             if last is not None:
                 self.circuit_breaker.record_result(pos.strategy, last.pnl > 0)

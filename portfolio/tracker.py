@@ -237,12 +237,16 @@ class PortfolioTracker:
     def mark_to_market(self, prices: dict[str, float]) -> None:
         total_unrealized = 0.0
         for sym, pos in self.state.positions.items():
-            price = prices.get(sym, pos.entry_price)
-            raw = pos.size_usd * (price - pos.entry_price) / pos.entry_price
-            if pos.direction == "short":
-                raw = -raw
-            pos.unrealized_pnl = raw
-            total_unrealized += raw
+            if sym in prices:
+                raw = pos.size_usd * (prices[sym] - pos.entry_price) / pos.entry_price
+                if pos.direction == "short":
+                    raw = -raw
+                pos.unrealized_pnl = raw
+            # else: 가격 없음(데이터 갭/stale 심볼 엔진 제외) → unrealized_pnl 직전값 유지.
+            # entry_price로 폴백해 0으로 동결하면 깊은 손실 포지션이 equity를 부풀려
+            # deep_floor/교차청산이 과소발동(under-protective)한다. 연속데이터 백테는
+            # 전 심볼 상존 → 이 분기 미발생 → 결과 불변.
+            total_unrealized += pos.unrealized_pnl
         # equity = 실현기준 cash + 미실현 PnL (진정한 MTM 자산)
         self.state.equity = self.state.cash + total_unrealized
 
