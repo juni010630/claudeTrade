@@ -240,3 +240,11 @@ v20 + 3변경: multi volume_multiplier 1.8→2.0, scorer volume_ratio_threshold 
 **최종 권고 상세 = research/screw_sweep/FINDINGS.md.** 강건 개선 = "노출을 MR 슬리브로 + 품질필터 올리기":
 배분 50:25:25→40:30:30 · MR TP3.0→4.0 · 슬리브 DVOL t55→60 · multi vol1.8→~2.0 · scorer vol1.8→2.0.
 cmax4030: Sh1.962→2.299 / MDD-26.9→-24.3 / 2023+14→+54 / 전연도 우월 / **25bps서도 2023+5 생존**(baseline 15bps 사망). 미배포(사용자 결정).
+
+## WAVE 18 — 반대신호 조기청산 (사용자 아이디어) ✅ 채택후보
+엔진에 이미 구현(check_early_exit, `early_exit_on_opp` 플래그, 기본 off). ema·multi 켜기:
+- full: Sh 2.251→**2.327** / MDD -23.2 동일 / 수익 +19% / 전연도↑ / 거래 1070→1081(턴오버 무)
+- **IS 1.553→1.629 · OOS 3.527→3.609 (둘 다 우월)** · OOS MDD -23→-21 개선 = 워크포워드 통과
+- 라이브 패리티 확정(live_trade도 engine._process_bar 매봉 호출 = check_early_exit 동일 실행), 코드 0줄, 자유도 1
+- 메커니즘: 추세책이 반대 모멘텀 시 청산(+반대 풀시그널 동봉 시 자동 reverse) = 추세반전 되돌림 회피
+→ **v21d = config/final_v21d_eexit.yaml (v21c + ema·multi early_exit_on_opp:true). 배포 제안.** (macross/MR 확장은 신규코드/기각영역이라 보류)
