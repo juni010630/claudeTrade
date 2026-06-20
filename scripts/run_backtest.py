@@ -30,6 +30,10 @@ from risk.position_sizer import PositionSizer
 from signals.scorer import ConfluenceScorer
 from strategies.ema_cross import EMACrossStrategy
 from strategies.ema_slow_daily import EmaSlowDailyStrategy
+try:
+    from strategies.hammer_vol import HammerVolStrategy  # 미커밋 연구 전략 — 파일 없으면 graceful skip
+except ImportError:
+    HammerVolStrategy = None
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum_breakout import MomentumBreakoutStrategy
 from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
@@ -57,6 +61,10 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         "macross_d":          EmaSlowDailyStrategy,  # 1d 슬로우 크로스 (NEWEDGE_GREEDY_RESULTS.md)
         "momentum_breakout":  MomentumBreakoutStrategy,  # 15m 모멘텀 (Scalp 검증 포팅)
     }
+    # 망치+거래량 (research/screw_sweep, 데이터마이닝 후보). 파일 미커밋이라 조건부 등록 —
+    # ⚠️ live_trade.build_engine과 반드시 대칭(백테=라이브 절대규칙). 양쪽 동일 패턴.
+    if HammerVolStrategy is not None:
+        strategy_map["hammer_vol"] = HammerVolStrategy
     strategies = []
     for key, cls in strategy_map.items():
         cfg = p.get("strategies", {}).get(key)
@@ -318,7 +326,11 @@ def main() -> None:
     report = engine.run(snapshots)
     report.print_summary()
     if report.aborted:
-        print(f"\n[EARLY-STOP] aborted=True (running peak 대비 DD가 {args.abort_mdd*100:.1f}% 초과)")
+        # abort 임계는 --abort-mdd가 없으면 config의 deep_floor_dd로 폴백되므로
+        # args.abort_mdd가 None일 수 있다 → None*100 TypeError 방지.
+        _eff_abort = args.abort_mdd if args.abort_mdd is not None else p.get("risk", {}).get("deep_floor_dd")
+        _pct = f"{_eff_abort*100:.1f}%" if _eff_abort is not None else "deep_floor"
+        print(f"\n[EARLY-STOP] aborted=True (running peak 대비 DD가 {_pct} 초과)")
 
 
 if __name__ == "__main__":

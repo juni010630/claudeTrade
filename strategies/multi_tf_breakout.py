@@ -47,6 +47,30 @@ class MultiTFBreakoutStrategy(BaseStrategy):
         self.signal_tf: str = cfg.get("signal_tf", "1h")
         self.confirm_tf: str = cfg.get("confirm_tf", "4h")
         self.filter_tf: str = cfg.get("filter_tf", "1d")
+        # 펀딩 레짐 게이트(기본 off): 펀딩-z > funding_z_max 인 돌파(양방향) 스킵.
+        # 돌파는 펀딩 낮은 레짐(고변동/추세)서 작동, 높은 레짐(안일)서 실패 — 진입 필터.
+        # funding-z는 scripts/precompute_funding_z.py 산출물. 캐시 없으면 no-op(라이브 안전).
+        self.funding_gate: bool = cfg.get("funding_gate", False)
+        self.funding_z_max: float = cfg.get("funding_z_max", 0.5)
+        # 검증용 대조군: funding 대신 같은 비율을 무작위 스킵(결정론적 해시). "그냥 덜거래" 효과 분리.
+        self.funding_gate_random: bool = cfg.get("funding_gate_random", False)
+        self.funding_gate_random_pct: int = cfg.get("funding_gate_random_pct", 25)
+        self._fz: dict[str, "pd.Series"] = {}
+        if self.funding_gate:
+            from pathlib import Path
+            fzp = Path(__file__).resolve().parents[1] / "data" / "cache" / "funding_z.parquet"
+            if fzp.exists():
+                az = pd.read_parquet(fzp)
+                az["timestamp"] = pd.to_datetime(az["timestamp"], utc=True)
+                for sym, g in az[az["symbol"].isin(self.symbols)].groupby("symbol"):
+                    self._fz[sym] = g.set_index("timestamp")["z"].sort_index()
+
+    def _fz_asof(self, sym: str, ts) -> float | None:
+        s = self._fz.get(sym)
+        if s is None or len(s) == 0:
+            return None
+        v = s.asof(ts)
+        return None if pd.isna(v) else float(v)
 
     @property
     def name(self) -> str:
@@ -111,6 +135,18 @@ class MultiTFBreakoutStrategy(BaseStrategy):
                 avg_vol = float(df_1h["volume"].iloc[-self.volume_lookback - 1:-1].mean())
                 vol_ok = avg_vol > 0 and curr_vol / avg_vol >= self.volume_multiplier
 
+                # 펀딩 레짐 게이트: 펀딩-z 높은(안일) 레짐의 돌파 스킵 (양방향, 룩어헤드 없음=asof)
+                if self.funding_gate:
+                    if self.funding_gate_random:   # 대조군: 같은 비율 무작위 스킵(결정론)
+                        import hashlib
+                        h = int(hashlib.md5(f"{sym}|{snapshot.timestamp.isoformat()}".encode()).hexdigest(), 16) % 100
+                        if h < self.funding_gate_random_pct:
+                            continue
+                    else:
+                        fz = self._fz_asof(sym, snapshot.timestamp)
+                        if fz is not None and fz > self.funding_z_max:
+                            continue
+
                 if bull_4h and prev_close <= prev_upper and curr_close > curr_upper and vol_ok:
                     entry = curr_close
                     signals.append(Signal(
@@ -164,7 +200,9 @@ class MultiTFBreakoutStrategy(BaseStrategy):
             prev_close = float(df_1h["close"].iloc[-2])
             curr_upper = float(upper_1h.iloc[-1])
             curr_lower = float(lower_1h.iloc[-1])
-            
+            prev_upper = float(upper_1h.iloc[-2])
+            prev_lower = float(lower_1h.iloc[-2])
+
             # 조기 청산 시 거래량 필터 제외, 가격+모멘텀 반전만 확인
             if position.direction == "long" and bear_4h and prev_close >= prev_lower and curr_close < curr_lower:
                 return True

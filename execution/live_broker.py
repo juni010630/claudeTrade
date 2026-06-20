@@ -289,10 +289,34 @@ class LiveBroker:
             mk = self._try_maker_entry(symbol, side, float(qty), float(price))
             if mk is not None:
                 if mk["qty"] <= 0:
-                    # 상태 확인 불가 — 이중 주문 위험이라 이번 진입 스킵 (다음 봉 sync가 정리)
-                    raise ccxt.NetworkError(f"maker 진입 상태 불확실: {symbol} — 진입 스킵")
-                result = {"average": mk["average"]}
-                final_qty = float(mk["qty"])
+                    # 상태 확인 불가. 지정가가 실제 체결됐을 수 있으므로 거래소 포지션을 직접
+                    # 질의 — 실재하면 SL 없는 고아 방지 위해 채택(평단·실수량)하고 아래서 TP/SL
+                    # 등록, 미실재면 안전하게 진입 스킵. (시장가 경로 311-336과 동일 패턴)
+                    if symbol in self.fetch_open_symbols():
+                        ep, contracts = None, None
+                        try:
+                            for pp in self.exchange.fetch_positions([symbol]):
+                                c = abs(float(pp.get("contracts") or 0))
+                                if c > 0:
+                                    contracts = c
+                                    ep = float(pp.get("entryPrice") or 0) or None
+                                    break
+                        except Exception:
+                            pass
+                        if contracts:
+                            final_qty = contracts
+                        result = {"average": ep or float(price)}
+                        logger.warning(
+                            "maker 상태불확실이나 포지션 실재 — 채택+SL등록: %s qty=%.6f @%.6g",
+                            symbol, final_qty, ep or float(price),
+                        )
+                    else:
+                        raise ccxt.NetworkError(
+                            f"maker 진입 상태 불확실(포지션 미실재 확인) — 진입 스킵: {symbol}"
+                        )
+                else:
+                    result = {"average": mk["average"]}
+                    final_qty = float(mk["qty"])
 
         # 시장가 주문 (재시도 포함, 이중 주문 방지)
         if result is None:

@@ -58,10 +58,22 @@ class DataLoader:
         # ⚠️ asi8은 인덱스 단위(ns/us/ms)를 그대로 따르는데 비교 상대 Timestamp.value는 항상 ns —
         # pandas 3.x가 parquet을 ms로 읽으면 단위 불일치로 전 봉 통과(look-ahead) → as_unit("ns") 필수.
         self._close_i8: dict[tuple[str, str], np.ndarray] = {}
+        # (sym, tf)별 "직전 갭 위치" 누적배열 — iterate에서 lookback 윈도가 캐시 내부 공백(비인접
+        # 봉)을 가로질러 BB/RSI/ATR을 오염시키지 않도록 윈도 시작을 갭 이후로 클램프하는 데 사용.
+        # 갭 없으면 전부 -1 → 클램프 미발동 → 무갭 경로 결과 비트동일.
+        self._last_gap: dict[tuple[str, str], np.ndarray] = {}
+        _gap_thr = {tf: (pd.Timedelta(tf) * 3.0).to_timedelta64() for tf in timeframes}
         for sym in symbols:
             for tf in timeframes:
                 idx = self._ohlcv[sym][tf].index
                 self._close_i8[(sym, tf)] = (idx + pd.Timedelta(tf)).as_unit("ns").asi8
+                n = len(idx)
+                gmark = np.full(n, -1, dtype=np.int64)
+                if n >= 2:
+                    diffs = idx.to_series().diff().to_numpy()
+                    big = np.where(diffs > _gap_thr[tf])[0]
+                    gmark[big] = big
+                self._last_gap[(sym, tf)] = np.maximum.accumulate(gmark)
         self._fund_i8: dict[str, np.ndarray] = {
             sym: fd.index.as_unit("ns").asi8 for sym, fd in self._funding.items()
         }
@@ -132,6 +144,12 @@ class DataLoader:
                     # close_time ≤ effective_time 인 행 수 = searchsorted (기존 마스크와 동일 결과)
                     end = int(np.searchsorted(self._close_i8[(sym, tf)], eff_i8, side="right"))
                     start = max(0, end - self.lookback)
+                    # 갭 클램프: 윈도 [start,end) 안에 캐시 공백이 있으면 시작을 가장 최근 갭 이후로
+                    # 올려 비인접 봉 splice 차단(지표 오염 방지). 무갭이면 g=-1 → 미발동(결과 불변).
+                    if end > 0:
+                        g = int(self._last_gap[(sym, tf)][end - 1])
+                        if g > start:
+                            start = g
                     cached = self._win_cache.get((sym, tf))
                     if cached is not None and cached[0] == start and cached[1] == end:
                         bars[sym][tf] = cached[2]

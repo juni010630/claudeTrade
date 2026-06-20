@@ -1572,7 +1572,7 @@ class BacktestEngine:
         # 청산 완료 후 equity ≤ 0일 때만 실제 파산 처리.
         if state.equity <= total_mm:
             for sym in list(state.positions.keys()):
-                self._force_close(sym, prices.get(sym, 0.0), now, "liquidated")
+                self._force_close(sym, self._liq_price(sym, state.positions[sym], prices), now, "liquidated")
             self.tracker.mark_to_market(prices)
             if self.tracker.snapshot().equity <= 0:
                 self._bankrupt = True
@@ -1699,11 +1699,25 @@ class BacktestEngine:
             if state.equity <= 0:
                 # equity 음수 → 나머지 포지션도 현재가에 청산
                 for rem in list(state.positions.keys()):
-                    self._force_close(rem, prices.get(rem, 0.0), now, "liquidated")
+                    self._force_close(rem, self._liq_price(rem, state.positions[rem], prices), now, "liquidated")
                 self._bankrupt = True
                 return True
 
         return self._bankrupt
+
+    def _liq_price(self, sym: str, pos, prices: dict[str, float]) -> float:
+        """청산 체결가. prices에 유효가 있으면 그대로. stale(데이터갭/상폐로 prices 누락)면
+        직전 mark(=이월 unrealized_pnl과 일치하는 가격)로 청산 — 0.0→entry 폴백 시 이월손실이
+        0으로 소멸돼 파산판정이 생존으로 뒤집히는 것을 방지(트리거 equity와 동일 가격기준)."""
+        px = prices.get(sym)
+        if px is not None and px > 0:
+            return px
+        if not pos.size_usd:
+            return pos.entry_price
+        sign = 1.0 if pos.direction == "long" else -1.0
+        px_mark = pos.entry_price * (1.0 + sign * pos.unrealized_pnl / pos.size_usd)
+        # mark가 0 이하(손실≥노셔널)면 _force_close의 entry 폴백이 손실을 소멸시키므로 미세 양수로.
+        return px_mark if px_mark > 0 else pos.entry_price * 1e-9
 
     def _force_close(self, symbol: str, price: float, now: pd.Timestamp, reason: str) -> None:
         state = self.tracker.snapshot()

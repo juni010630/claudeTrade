@@ -45,6 +45,10 @@ from risk.position_sizer import PositionSizer
 from signals.scorer import ConfluenceScorer
 from strategies.ema_cross import EMACrossStrategy
 from strategies.ema_slow_daily import EmaSlowDailyStrategy
+try:
+    from strategies.hammer_vol import HammerVolStrategy  # 미커밋 연구 전략 — 파일 없으면 graceful skip
+except ImportError:
+    HammerVolStrategy = None
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum_breakout import MomentumBreakoutStrategy
 from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
@@ -109,7 +113,6 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
 
     # ⚠️ run_backtest.build_engine의 strategy_map과 키 집합이 정확히 일치해야 함
     # (백테=라이브 절대규칙). 누락 시 백테는 거래·라이브는 조용히 스킵 → 불일치.
-    # (hammer_vol은 strategies/hammer_vol.py가 미커밋이라 양쪽 모두 미등록 — 커밋 시 동반 추가할 것)
     strategy_map = {
         "ema_cross":          EMACrossStrategy,
         "ema_cross_slow":     EMACrossStrategy,   # 다중 속도 변형 (strategy_name으로 구분)
@@ -118,6 +121,9 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         "macross_d":          EmaSlowDailyStrategy,  # 1d 슬로우 크로스 (NEWEDGE_GREEDY_RESULTS.md)
         "momentum_breakout":  MomentumBreakoutStrategy,  # 15m 모멘텀 (Scalp 검증 포팅)
     }
+    # 망치+거래량 — run_backtest.build_engine과 대칭 조건부 등록 (파일 미커밋 → graceful skip).
+    if HammerVolStrategy is not None:
+        strategy_map["hammer_vol"] = HammerVolStrategy
     strategies = []
     for key, cls in strategy_map.items():
         cfg = p.get("strategies", {}).get(key)
