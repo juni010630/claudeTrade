@@ -31,7 +31,7 @@ from signals.scorer import ConfluenceScorer
 from strategies.ema_cross import EMACrossStrategy
 from strategies.ema_slow_daily import EmaSlowDailyStrategy
 try:
-    from strategies.hammer_vol import HammerVolStrategy  # 미커밋 연구 전략 — 파일 없으면 graceful skip
+    from strategies.hammer_vol import HammerVolStrategy  # ⚠️ 기각된 연구 전략(2026-06-19, HAMMER_RESULTS.md) — 미커밋·off-default, 라이브 미사용. 파일 없으면 graceful skip
 except ImportError:
     HammerVolStrategy = None
 from strategies.mean_reversion import MeanReversionStrategy
@@ -61,8 +61,9 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         "macross_d":          EmaSlowDailyStrategy,  # 1d 슬로우 크로스 (NEWEDGE_GREEDY_RESULTS.md)
         "momentum_breakout":  MomentumBreakoutStrategy,  # 15m 모멘텀 (Scalp 검증 포팅)
     }
-    # 망치+거래량 (research/screw_sweep, 데이터마이닝 후보). 파일 미커밋이라 조건부 등록 —
-    # ⚠️ live_trade.build_engine과 반드시 대칭(백테=라이브 절대규칙). 양쪽 동일 패턴.
+    # 망치+거래량 (research/screw_sweep). ⚠️ 기각됨(2026-06-19, HAMMER_RESULTS.md): IS엣지 실재하나
+    # 엔진+비용+OOS 비생존(IS+0.80/OOS-0.48). off-default 스캐폴딩 — 파일 미커밋이라 조건부 등록(어떤 라이브
+    # config도 미사용). live_trade.build_engine과 반드시 대칭(백테=라이브 절대규칙). 양쪽 동일 패턴.
     if HammerVolStrategy is not None:
         strategy_map["hammer_vol"] = HammerVolStrategy
     strategies = []
