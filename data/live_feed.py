@@ -159,7 +159,7 @@ class LiveFeed:
                 if pdf is None or len(pdf) == 0:
                     continue
                 pf_close = pdf["timestamp"].iloc[-1] + pd.Timedelta(minutes=pf_mins)
-                if snap_ts - pf_close > tol:
+                if snap_ts - pf_close >= tol:  # 1봉 이상 뒤처지면 제외 (== 1봉도 stale)
                     logger.warning(
                         "심볼 stale 제외: %s primary 최신봉 close=%s vs snap=%s",
                         sym, pf_close, snap_ts,

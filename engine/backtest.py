@@ -684,6 +684,12 @@ class BacktestEngine:
                 if self.guards.is_cooldown_active(cand["symbol"], cand["strategy"], now):
                     continue
             else:
+                # 격리 북(macross_d)이 이미 보유한 심볼이면 비격리 진입을 막는다 —
+                # 가드뷰(_state_excluding_isolated)는 격리 포지션을 빼므로 check_symbol_free가
+                # 못 잡고, apply_fill이 심볼키로 덮어써 격리 포지션을 소리없이 유실시킨다.
+                # 격리 경로(위 676행)의 전체상태 심볼중복 가드와 대칭.
+                if cand["symbol"] in state.positions:
+                    continue
                 _g_state = self._state_excluding_isolated(state)
                 if not self.guards.is_entry_allowed(_g_state, _cand_proxy(cand)):
                     continue
@@ -951,6 +957,8 @@ class BacktestEngine:
                 if self.guards.is_cooldown_active(sym, pe["strategy"], now):
                     continue
             else:
+                if sym in state.positions:
+                    continue  # 격리 북 보유 심볼 덮어쓰기 방지 (taker 경로·676행과 대칭)
                 _g_state = self._state_excluding_isolated(state)
                 if not self.guards.is_entry_allowed(_g_state, proxy):
                     continue  # max_positions/same_direction/심볼중복/DD/쿨다운
@@ -1623,7 +1631,7 @@ class BacktestEngine:
                     cur = self.tracker.snapshot()
                     if cur.equity <= 0:
                         for rem in list(cur.positions.keys()):
-                            self._force_close(rem, prices.get(rem, 0.0), now, "liquidated")
+                            self._force_close(rem, self._liq_price(rem, cur.positions[rem], prices), now, "liquidated")
                         self._bankrupt = True
                         return True
                     if cur.equity > _total_mm_at(prices):

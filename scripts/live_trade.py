@@ -472,6 +472,33 @@ def main() -> None:
     # systemd Restart=always 환경에서 재기동마다 손실 방어 가드가 0으로 리셋되는 것을 방지.
     state_store.restore_runtime(engine)
 
+    # 딥플로어 해제 후 거래 재개: 여기 도달 = halt 파일 없음(위 357행 통과). restore_runtime이
+    # peak를 max()로 복원하므로, 딥플로어(-55%) 발동 후 운영자가 halt 파일만 지우고 재시작하면
+    # 복원된 peak 대비 현재 잔고가 여전히 임계 이하 → 첫 봉에서 _aborted 재발동 → 영구 재정지된다.
+    # flat(딥플로어가 전량청산)이고 복원 peak 대비 DD가 이미 deep_floor 임계 이하 = 해제 의사로
+    # 보고 peak를 현재 잔고로 재앵커해 -55% 예산을 리셋한다. (flat 조건 = 청산 미완료 시 재앵커
+    # 금지로 안전; 정상 가동 중 -55% 미달이면 조건 불성립이라 정상 재기동엔 영향 없음.)
+    if engine._abort_mdd is not None and engine._peak_equity > 0 \
+            and not engine.tracker.state.positions:
+        _cur_eq = engine.tracker.snapshot().equity
+        _dd = (_cur_eq - engine._peak_equity) / engine._peak_equity
+        if _dd <= engine._abort_mdd:
+            logger.error(
+                "딥플로어 해제 감지 — peak 재앵커 %.2f → %.2f (DD %.1f%% ≤ 임계 %.1f%%, 거래 재개)",
+                engine._peak_equity, _cur_eq, _dd * 100, engine._abort_mdd * 100,
+            )
+            engine._peak_equity = _cur_eq
+            state_store.save(engine.tracker.snapshot(), engine=engine)
+            if notifier and notifier.enabled:
+                try:
+                    notifier.notify_info(
+                        f"♻️ <b>딥플로어 해제 — 거래 재개</b>\n"
+                        f"peak 재앵커: 현재 잔고 ${_cur_eq:,.2f} 기준 "
+                        f"-{abs(engine._abort_mdd) * 100:.0f}% 예산 리셋"
+                    )
+                except Exception:
+                    pass
+
     logger.info("엔진 초기화 완료 (전략 %d개)", len(engine.strategies))
 
     # LiveFeed 생성
