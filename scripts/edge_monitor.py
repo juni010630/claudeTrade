@@ -40,6 +40,7 @@ import pandas as pd
 import yaml
 
 from data.loader import DataLoader
+from risk.circuit_breaker import BreakerStatus, CircuitBreaker
 import scripts.run_backtest as rb
 
 logging.basicConfig(level=logging.INFO,
@@ -239,6 +240,177 @@ def slippage_bps(live_row, rep_row) -> float:
     return raw if live_row["direction"] == "long" else -raw
 
 
+# ── ④-b 미체결 사유 분류 (경로분기 vs 미상) ───────────────────────
+# rep_only(라이브 미체결) 각 건을, 그 entry_time 시점 라이브 북을 복원해
+# 엔진(_process_bar)과 동일한 게이트 순서로 차단 사유를 추정한다. 전부 설명되면
+# 경로분기(리플레이=앵커 flat 시작 vs 라이브=이월 포지션·실체결 경로) → 양성이라
+# WARN 억제. 하나라도 '미상'이면 진짜 누락 가능성 → WARN. (자동 행동 없음, 진단만)
+def _ts(v) -> pd.Timestamp:
+    t = pd.Timestamp(v)
+    return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+
+def _gate_cfg(p: dict) -> dict:
+    """엔진 진입 게이트 임계 (config 단일 출처 — 하드코딩 금지)."""
+    r = p.get("risk", {})
+    return dict(
+        max_positions=int(r.get("max_positions", 10)),
+        max_same_direction=int(r.get("max_same_direction", 4)),
+        corr_thr=float(r.get("correlation_block_threshold", 0.8)),
+        corr_lookback=int(r.get("correlation_lookback", 100)),
+        cooldown_h=float(r.get("tp_cooldown_hours", 0.0)),
+        pause_losses=int(r.get("circuit_breaker_pause_losses", 5)),
+        stop_losses=int(r.get("circuit_breaker_stop_losses", 10)),
+        pause_hours=int(r.get("circuit_breaker_pause_hours", 48)),
+        iso=p.get("strategy_guard_isolated", {}) or {},
+    )
+
+
+def live_book_history() -> list[dict]:
+    """라이브 전체 포지션 이력 (앵커 무관) — 북 복원 + CB 재구성용.
+    trades.csv 청산분(pnl·exit_reason 포함) + state.json 미청산분. 앵커 이전
+    이월 포지션도 포함해야 그 시각 상관·심볼점유 판정이 라이브와 일치한다."""
+    rows = []
+    if TRADES_CSV.exists():
+        df = pd.read_csv(TRADES_CSV)
+        for _, r in df.iterrows():
+            rows.append(dict(
+                symbol=r["symbol"], strategy=r["strategy"], direction=r["direction"],
+                entry_time=_ts(r["entry_time"]), exit_time=_ts(r["exit_time"]),
+                exit_reason=str(r.get("exit_reason", "") or ""),
+                pnl=float(r.get("pnl", 0) or 0)))
+    if STATE_JSON.exists():
+        data = json.loads(STATE_JSON.read_text())
+        for sym, pos in data.get("positions", {}).items():
+            rows.append(dict(
+                symbol=sym, strategy=pos["strategy"], direction=pos["direction"],
+                entry_time=_ts(pos["opened_at"]), exit_time=None,
+                exit_reason="", pnl=None))
+    return rows
+
+
+def _open_at(history: list[dict], t: pd.Timestamp) -> list[dict]:
+    """t 시점 라이브 보유 (진입 < t, 미청산 또는 청산 > t). 엔진은 청산(2·4단계)을
+    진입(6단계)보다 먼저 처리하므로 동봉 청산분(exit==t)은 제외한다."""
+    return [h for h in history
+            if h["entry_time"] < t and (h["exit_time"] is None or h["exit_time"] > t)]
+
+
+class _CorrCache:
+    """edge_cache 1h 종가로 임의 시점 상관 — 엔진 corr_filter와 동일(1h 수익률 lookback개)."""
+    def __init__(self, lookback: int) -> None:
+        self.lookback = lookback
+        self._closes: dict = {}
+
+    def _close(self, sym: str):
+        if sym not in self._closes:
+            path = CACHE_DIR / f"ohlcv_{sym}_1h.parquet"
+            if path.exists():
+                s = pd.read_parquet(path).set_index("timestamp")["close"]
+                s.index = pd.to_datetime(s.index, utc=True)
+                self._closes[sym] = s
+            else:
+                self._closes[sym] = None
+        return self._closes[sym]
+
+    def corr(self, a: str, b: str, t: pd.Timestamp):
+        sa, sb = self._close(a), self._close(b)
+        if sa is None or sb is None:
+            return None
+        ra = sa[sa.index < t].pct_change().dropna().iloc[-self.lookback:]
+        rb_ = sb[sb.index < t].pct_change().dropna().iloc[-self.lookback:]
+        m = pd.DataFrame({"a": ra, "b": rb_}).dropna()
+        if len(m) < 10:
+            return None
+        return abs(float(m["a"].corr(m["b"])))
+
+
+def _cb_status_at(history, strategy, t, iso_set, g):
+    """closed trades(앵커 무관·격리 제외)를 시간순 record_result로 재생 → t 시점 CB 상태.
+    임계 도달 직후 get_status(청산시각)를 호출해 paused_until 설정을 모사한다
+    (승 1건이 48h 정지창을 못 지우는 엔진 동작과 일치). 승=실현 pnl>0."""
+    cb = CircuitBreaker(strategy_pause_losses=g["pause_losses"],
+                        global_stop_losses=g["stop_losses"],
+                        pause_duration_hours=g["pause_hours"])
+    closed = sorted((h for h in history
+                     if h["exit_time"] is not None and h["strategy"] not in iso_set),
+                    key=lambda h: h["exit_time"])
+    for h in closed:
+        if h["exit_time"] >= t:
+            break
+        cb.record_result(h["strategy"], (h["pnl"] or 0) > 0)
+        cb.get_status(h["strategy"], h["exit_time"])
+    return cb.get_status(strategy, t)
+
+
+def classify_miss(rr, history, corr_cache, g) -> tuple[str, bool]:
+    """라이브 미체결 1건의 차단 사유 → (사유, 양성여부). 엔진 게이트 순서 준수."""
+    t, sym, strat, dirn = rr["entry_time"], rr["symbol"], rr["strategy"], rr["direction"]
+    iso_set = set(g["iso"].keys())
+    book = _open_at(history, t)
+    # 1) 심볼 점유 (격리 포함 — 엔진은 전체 state.positions로 막는다)
+    occ = next((h for h in book if h["symbol"] == sym), None)
+    if occ is not None:
+        return f"심볼점유({occ['direction']} {occ['strategy']} 보유중)", True
+    if strat in iso_set:  # 격리 북: 자체 슬롯/방향 한도만 (corr·글로벌가드 면제)
+        ic = g["iso"].get(strat, {})
+        own = [h for h in book if h["strategy"] == strat]
+        if len(own) >= int(ic.get("max_positions", 9999)):
+            return f"격리북 슬롯풀({len(own)}/{ic.get('max_positions')})", True
+        if sum(1 for h in own if h["direction"] == dirn) >= int(ic.get("max_same_direction", 9999)):
+            return "격리북 방향한도", True
+        return "미상(점검필요)", False
+    non_iso = [h for h in book if h["strategy"] not in iso_set]
+    # 2) CB (전략 연속손절 정지 / 전체 중단)
+    cb = _cb_status_at(history, strat, t, iso_set, g)
+    if cb == BreakerStatus.STOPPED:
+        return "CB 전체중단", True
+    if cb == BreakerStatus.PAUSED:
+        return f"CB 전략정지({strat} 연속손절)", True
+    # 3) 슬롯 / 방향 한도 (비격리 가드뷰 기준)
+    if len(non_iso) >= g["max_positions"]:
+        return f"슬롯풀({len(non_iso)}/{g['max_positions']})", True
+    same = sum(1 for h in non_iso if h["direction"] == dirn)
+    if same >= g["max_same_direction"]:
+        return f"방향한도({same}/{g['max_same_direction']} {dirn})", True
+    # 4) TP 쿨다운
+    if g["cooldown_h"] > 0:
+        for h in history:
+            if (h["symbol"] == sym and h["strategy"] == strat and h["exit_reason"] == "tp"
+                    and h["exit_time"] is not None and h["exit_time"] < t
+                    and (t - h["exit_time"]) <= pd.Timedelta(hours=g["cooldown_h"])):
+                return "TP쿨다운", True
+    # 5) 상관차단 (동방향 비격리 보유분 중 |corr|≥임계)
+    best = None
+    for h in non_iso:
+        if h["direction"] != dirn:
+            continue
+        c = corr_cache.corr(sym, h["symbol"], t)
+        if c is not None and c >= g["corr_thr"] and (best is None or c > best[1]):
+            best = (h["symbol"], c)
+    if best is not None:
+        return f"상관차단({best[0]} {best[1]:.2f}≥{g['corr_thr']:.2f})", True
+    return "미상(점검필요)", False
+
+
+def _timing_pairs(rep_only, live_only) -> dict:
+    """rep_only↔live_only 동일(심볼·전략·방향) 근접진입(1h<Δ≤36h)=타이밍시프트 페어.
+    id(row)→상대 진입시각 문자열."""
+    out, used = {}, set()
+    for rr in rep_only:
+        for i, lr in enumerate(live_only):
+            if i in used:
+                continue
+            if (lr["symbol"] == rr["symbol"] and lr["strategy"] == rr["strategy"]
+                    and lr["direction"] == rr["direction"]
+                    and MATCH_TOL < abs(lr["entry_time"] - rr["entry_time"]) <= pd.Timedelta(hours=36)):
+                used.add(i)
+                out[id(rr)] = f"{lr['entry_time']:%m-%d %H:%M}"
+                out[id(lr)] = f"{rr['entry_time']:%m-%d %H:%M}"
+                break
+    return out
+
+
 # ── ⑤ 일별 equity 로그 + 롤링 백분위 ──────────────────────────────
 def fetch_usdt_balance() -> float | None:
     """라이브 USDT 총잔고. 조회 실패 시 None."""
@@ -327,15 +499,36 @@ def main() -> None:
         days = max(0, (pd.Timestamp.now(tz="UTC") - ANCHOR).days)
         lines.append(f"기간 {ANCHOR.date()}~ ({days}일) | 라이브 {len(live)}건 / 리플레이 {len(rep)}건")
 
-        # ① 신호 패리티
+        # ① 신호 패리티 — 불일치 각 건을 그 시각 라이브 북 복원 + 엔진 게이트 체인으로
+        #    사유 분류. 전부 경로분기(양성)면 WARN 억제, '미상'이 하나라도 있으면 WARN.
         if live_only or rep_only:
-            severity = "WARN"
-            for lr in live_only:
-                lines.append(f"① 라이브에만 존재: {lr['symbol']} {lr['direction']} "
-                             f"{lr['strategy']} @{lr['entry_time']:%m-%d %H:%M}")
+            history = live_book_history()
+            gcfg = _gate_cfg(p)
+            corr_cache = _CorrCache(gcfg["corr_lookback"])
+            timing = _timing_pairs(rep_only, live_only)
+            ev_lines, unexplained = [], 0
             for rr in rep_only:
-                lines.append(f"① 리플레이에만 존재(라이브 미체결): {rr['symbol']} "
-                             f"{rr['direction']} {rr['strategy']} @{rr['entry_time']:%m-%d %H:%M}")
+                pair = timing.get(id(rr))
+                if pair is not None:
+                    reason, benign = f"타이밍시프트(라이브 {pair} 진입)", True
+                else:
+                    reason, benign = classify_miss(rr, history, corr_cache, gcfg)
+                unexplained += 0 if benign else 1
+                ev_lines.append(f"① 라이브 미체결: {rr['symbol']} {rr['direction']} "
+                                f"{rr['strategy']} @{rr['entry_time']:%m-%d %H:%M} → {reason}")
+            for lr in live_only:
+                pair = timing.get(id(lr))
+                reason = (f"타이밍시프트(리플레이 {pair} 진입)" if pair is not None
+                          else "경로분기(리플레이 미발생)")
+                ev_lines.append(f"① 라이브 전용: {lr['symbol']} {lr['direction']} "
+                                f"{lr['strategy']} @{lr['entry_time']:%m-%d %H:%M} → {reason}")
+            if unexplained:
+                severity = "WARN"
+            benign_cnt = len(rep_only) - unexplained
+            lines.append(f"① 패리티: 미체결 {len(rep_only)}건(경로분기 {benign_cnt}/"
+                         f"미상 {unexplained}) · 라이브전용 {len(live_only)}건"
+                         + (" ⚠️미상 점검필요" if unexplained else " ✓경로분기"))
+            lines.extend(ev_lines)
         else:
             lines.append(f"① 신호 패리티: {len(matched)}/{len(matched)} 일치 ✓")
 
