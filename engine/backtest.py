@@ -92,6 +92,10 @@ class BacktestEngine:
         sl_reversal_leverage: int = 10,  # reversal 포지션 레버리지 (기본 10x)
         tp_reversal: bool = False,       # True → TP 히트 시 반대 방향 동일 사이즈 진입
         tp_extend_on_signal: bool = False,  # True → 동일 방향 재시그널 시 TP 연장 (신규 진입 없음)
+        tp_round_snap: bool = False,        # True → TP를 라운드넘버 배리어 직전으로 당김 (실험)
+        tp_round_mode: str = "big",         # "big"=mag·mag/2 / "bigmid"=+mag/10
+        tp_round_max_pullin: float = 0.33,  # TP거리의 이 비율 이내일 때만 snap
+        tp_round_offset: float = 0.0,       # 대조군: 그리드 평행이동(0=진짜 라운드, 0.37=비라운드)
         pyramid_trigger_r: float | None = None,  # 평단 +N×R 도달 시 피라미딩 증액 (None=비활성)
         pyramid_add_fraction: float = 0.5,       # 증액 비율 (현재 사이즈 대비)
         pyramid_max_adds: int = 1,               # 최대 증액 횟수
@@ -233,6 +237,10 @@ class BacktestEngine:
         self._abort_mdd = abort_mdd_threshold
         self._peak_equity = initial_capital
         self._aborted = False
+        self._tp_round_snap = tp_round_snap
+        self._tp_round_mode = tp_round_mode
+        self._tp_round_max_pullin = tp_round_max_pullin
+        self._tp_round_offset = tp_round_offset
 
         self.ledger = Ledger(csv_path=trade_log_path)
         self.equity_curve = EquityCurve()
@@ -412,18 +420,53 @@ class BacktestEngine:
                 blocked_dirs = self._symbol_block_directions.get(signal.symbol)
                 if blocked_dirs and signal.direction in blocked_dirs:
                     continue
+                tp_final = (self._snap_tp_round(signal.entry_price, signal.tp_price, signal.direction)
+                            if self._tp_round_snap else signal.tp_price)
                 candidates.append({
                     "timestamp": signal.timestamp,
                     "symbol": signal.symbol,
                     "strategy": strategy.name,
                     "direction": signal.direction,
                     "entry_price": signal.entry_price,
-                    "tp_price": signal.tp_price,
+                    "tp_price": tp_final,
                     "sl_price": signal.sl_price,
                     "score": score_total,
                     "tier": tier_value,
                 })
         return candidates
+
+    def _snap_tp_round(self, entry: float, tp: float, direction: str) -> float:
+        """라운드넘버 배리어 직전으로 TP를 당긴다(pull-in only). look-ahead 없음 — 진입가/TP만 사용.
+        진입↔TP 사이 라운드 레벨 중 TP에 가장 가까운 것이 TP거리의 max_pullin 이내면 그 레벨로 TP 이동.
+        offset>0이면 그리드를 비(非)라운드로 평행이동 → 대조군(roundness vs 단순 TP축소 분리)."""
+        import math
+        if entry <= 0 or tp <= 0 or entry == tp:
+            return tp
+        dist = abs(tp - entry)
+        lo, hi = (tp, entry) if direction == "short" else (entry, tp)
+        mid = (entry + tp) / 2.0
+        if mid <= 0:
+            return tp
+        mag = 10.0 ** math.floor(math.log10(mid))
+        steps = [mag, mag / 2.0] + ([mag / 10.0] if self._tp_round_mode == "bigmid" else [])
+        off = self._tp_round_offset * mag
+        best = None
+        for s in steps:
+            k = math.ceil((lo - off) / s)
+            while k * s + off <= hi:
+                lvl = k * s + off
+                if lo < lvl < hi:  # entry↔TP 사이 = TP 도달 전 통과해야 할 배리어
+                    if direction == "short":     # 하락: TP 바로 위(최소 lvl)가 마지막 배리어
+                        best = lvl if best is None else min(best, lvl)
+                    else:                          # 상승: TP 바로 아래(최대 lvl)가 마지막 배리어
+                        best = lvl if best is None else max(best, lvl)
+                k += 1
+        if best is None:
+            return tp
+        pullin = abs(tp - best)
+        if 0 < pullin <= self._tp_round_max_pullin * dist:
+            return best  # TP를 라운드넘버로 당김 (배리어 전 익절)
+        return tp
 
     def run(self, snapshots: Iterator[MarketSnapshot]) -> MetricsReport:
         for snapshot in snapshots:
@@ -491,7 +534,30 @@ class BacktestEngine:
         if hasattr(self.broker, "fetch_open_symbols"):
             try:
                 open_syms = self.broker.fetch_open_symbols()
+                if open_syms is None:
+                    # 조회 실패 = "포지션 없음"과 다름 — 이 봉 sync 보류 (오판 시
+                    # 전 포지션 가짜 청산 + SL 취소 + 중복 진입 연쇄. 다음 봉 재시도)
+                    import logging
+                    logging.getLogger(__name__).warning("sync 보류: 거래소 포지션 조회 실패")
+                    open_syms = set(self.tracker.snapshot().positions.keys())
                 tracker_state = self.tracker.snapshot()
+                # 역방향 감시: 거래소에만 있는 포지션(크래시/미상 체결 고아) — 경보만
+                orphans = open_syms - set(tracker_state.positions.keys())
+                new_orphans = orphans - getattr(self, "_orphan_alerted", set())
+                if new_orphans:
+                    self._orphan_alerted = getattr(self, "_orphan_alerted", set()) | new_orphans
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "sync: 거래소 전용 포지션 감지(봇 미관리): %s", sorted(new_orphans))
+                    if self.notifier is not None and getattr(self.notifier, "enabled", False):
+                        try:
+                            self.notifier.notify_info(
+                                f"🚨 <b>봇 미관리 포지션 감지</b>\n"
+                                f"{', '.join(sorted(new_orphans))}\n"
+                                f"거래소에는 있으나 봇 장부에 없음 — SL 부재 가능, 수동 확인 필요"
+                            )
+                        except Exception:
+                            pass
                 stale = [s for s in tracker_state.positions.keys() if s not in open_syms]
                 for sym in stale:
                     pos = tracker_state.positions[sym]
@@ -500,7 +566,8 @@ class BacktestEngine:
                     exit_reason = "external_close"
                     if hasattr(self.broker, "fetch_recent_fill_price"):
                         exit_price = self.broker.fetch_recent_fill_price(sym)
-                    if exit_price is not None:
+                    real_fill = exit_price is not None
+                    if real_fill:
                         # TP 체결가와 비교하여 exit_reason 판별
                         if pos.tp_price > 0 and abs(exit_price - pos.tp_price) / pos.tp_price < 0.005:
                             exit_reason = "tp"
@@ -517,7 +584,10 @@ class BacktestEngine:
                         regime=self.regime_detector.classify(snapshot).regime,
                         confluence_score=pos.confluence_score,
                         commission=self._commission.calculate(exit_notional, exit_type),
-                        slippage_cost=self._slippage.cost(exit_notional, exit_type),
+                        # 실체결가에는 슬리피지가 이미 반영돼 있음 — 모델비용 이중부과 금지
+                        # (sl_poller 0673cec 수정과 동일 규칙)
+                        slippage_cost=0.0 if real_fill
+                        else self._slippage.cost(exit_notional, exit_type),
                     )
                     if exit_reason == "tp":
                         self.guards.record_tp(sym, pos.strategy, now)
@@ -648,6 +718,12 @@ class BacktestEngine:
 
         # 6. 동적 필터 + 체결
         for cand in candidates:
+            # stale/데이터갭 심볼(가격 추출 제외됨)은 진입 금지 — 동결된 신호가
+            # 수십 일 전 가격에 체결되는 것 방지. 정상 연속 데이터에선 항상 prices에
+            # 있으므로 무영향.
+            if cand["symbol"] not in prices:
+                continue
+
             # 티어별 심볼 차단
             tier_blocked = self._tier_block_symbols.get(cand["tier"])
             if tier_blocked and cand["symbol"] in tier_blocked:
@@ -658,10 +734,12 @@ class BacktestEngine:
                 if cb_status != BreakerStatus.ACTIVE:
                     continue
 
-            # TP 연장: 동일 방향 시그널 재발생 시 기존 포지션 TP 연장 (신규 진입 없음)
+            # TP 연장: 동일 전략·동일 방향 시그널 재발생 시 기존 포지션 TP 연장 (신규 진입 없음).
+            # 전략 일치 필수 — 없으면 비격리 신호가 격리 북(macross_d) 포지션의 TP를 변형.
             if self._tp_extend_on_signal:
                 existing = state.positions.get(cand["symbol"])
-                if existing is not None and existing.direction == cand["direction"]:
+                if (existing is not None and existing.direction == cand["direction"]
+                        and existing.strategy == cand["strategy"]):
                     mkt_p = prices.get(cand["symbol"], cand["entry_price"])
                     shift_p = mkt_p - cand["entry_price"]
                     new_tp = cand["tp_price"] + shift_p
@@ -729,11 +807,13 @@ class BacktestEngine:
                 _cap_base = state.equity * self._strategy_capital_fraction.get(cand["strategy"], 1.0)
             else:
                 _cap_base = state.equity * self._tilted_cap_frac(cand["strategy"], now)
+            # 글로벌 DVOL 스케일은 기준자본에 적용 — 사이저의 rpt·notional 캡 이후에
+            # 곱하면 캡을 우회해 선언된 리스크의 clip_hi배까지 커짐 (per-book 경로와 동일 규칙)
+            if self._size_scale_sched is not None:
+                _cap_base *= self._size_scale_factor(now)
             size_usd, leverage = _sizer.calculate(
                 tier, _cap_base, cand["entry_price"], cand["sl_price"]
             )
-            if self._size_scale_sched is not None:
-                size_usd *= self._size_scale_factor(now)
             if size_usd <= 0:
                 continue
 
@@ -1281,16 +1361,22 @@ class BacktestEngine:
             already_closed = False
             if hasattr(self.broker, "fetch_open_symbols"):
                 try:
-                    if sym not in self.broker.fetch_open_symbols():
+                    _open_syms = self.broker.fetch_open_symbols()
+                    # 조회 실패(None)면 청산 시도 유지 — reduceOnly라 이미 닫혔어도 무해
+                    if _open_syms is not None and sym not in _open_syms:
                         already_closed = True
                         import logging
                         logging.getLogger(__name__).info(
                             "거래소 포지션 이미 청산됨 (TP/SL 체결): %s — tracker만 업데이트", sym)
-                        # 실제 체결가 조회 시도
+                        # 실제 체결가 조회 시도 — 성공 시 비용도 실가 기준 재계산
+                        # (실체결가엔 슬리피지 기반영 → 모델비용 이중부과 금지)
                         if hasattr(self.broker, "fetch_recent_fill_price"):
                             real_price = self.broker.fetch_recent_fill_price(sym)
                             if real_price is not None:
                                 exit_price = real_price
+                                exit_notional = pos.size_usd / pos.entry_price * exit_price
+                                commission = self._commission.calculate(exit_notional, exit_type)
+                                slippage = 0.0
                 except Exception:
                     pass
             if not already_closed:
@@ -1732,9 +1818,10 @@ class BacktestEngine:
         if symbol not in state.positions:
             return
         pos = state.positions[symbol]
-        # 가격 누락(0 이하) → entry_price 폴백 (손익 0). 0.0 폴백은 가짜 대손실 발생.
+        # 가격 누락(0 이하) → 직전 mark 폴백 (_liq_price와 동일 규칙). entry 폴백은
+        # 이월 미실현손실을 0으로 소멸시켜 forced_stop/deep_floor 장부를 낙관 왜곡.
         if price is None or price <= 0:
-            price = pos.entry_price
+            price = self._liq_price(symbol, pos, {})
 
         # 라이브 브로커가 있으면 거래소 청산 먼저 시도
         if hasattr(self.broker, "market_close"):

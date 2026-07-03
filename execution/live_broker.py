@@ -200,6 +200,23 @@ class LiveBroker:
             if status == "closed" or filled >= qty * 0.999:
                 logger.info("maker 취소 직전 전량 체결: %s @%.6g", symbol, avg)
                 return {"average": avg, "qty": filled if filled > 0 else qty}
+            # 취소가 실패(네트워크 등)해 지정가가 여전히 open이면 시장가 추격 금지 —
+            # 살아있는 비-reduceOnly 지정가 + 시장가 = 최대 2배 포지션. 재취소로 종결 확인.
+            if status == "open":
+                for _retry in range(2):
+                    try:
+                        self.exchange.cancel_order(oid, symbol)
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                    status, filled, avg = _status()
+                    if status != "open":
+                        break
+                if status == "open":
+                    raise RuntimeError(f"지정가 취소 불가 — 이중 진입 방지 위해 추격 중단: {symbol}")
+                if status == "closed" or filled >= qty * 0.999:
+                    logger.info("maker 재취소 중 전량 체결: %s @%.6g", symbol, avg)
+                    return {"average": avg, "qty": filled if filled > 0 else qty}
 
             remain = qty - filled
             try:
@@ -278,7 +295,8 @@ class LiveBroker:
                 fill_price=price,
                 commission=self.commission.calculate(order.size_usd, OrderType.MARKET),
                 slippage_cost=self.slippage.cost(order.size_usd, OrderType.MARKET),
-                timestamp=pd.Timestamp.now(tz="UTC"),
+                timestamp=order.timestamp if order.timestamp is not None
+                else pd.Timestamp.now(tz="UTC"),
             )
             self._notify_entry(order, price)
             return fill
@@ -292,7 +310,23 @@ class LiveBroker:
                     # 상태 확인 불가. 지정가가 실제 체결됐을 수 있으므로 거래소 포지션을 직접
                     # 질의 — 실재하면 SL 없는 고아 방지 위해 채택(평단·실수량)하고 아래서 TP/SL
                     # 등록, 미실재면 안전하게 진입 스킵. (시장가 경로 311-336과 동일 패턴)
-                    if symbol in self.fetch_open_symbols():
+                    _open_syms = self._fetch_open_symbols_retry()
+                    if _open_syms is None:
+                        # 포지션 조회까지 실패 = 체결 여부 완전 미상 — 스킵하되 강경보
+                        # (지정가가 체결됐다면 SL 없는 나체 포지션일 수 있음 → 수동 확인)
+                        if self.notifier is not None and getattr(self.notifier, "enabled", False):
+                            try:
+                                self.notifier.notify_info(
+                                    f"🚨 <b>진입 상태 미상 — 수동 확인 필요</b>\n"
+                                    f"{symbol}: maker 주문 상태·포지션 조회 모두 실패.\n"
+                                    f"체결됐다면 SL 없는 포지션일 수 있음."
+                                )
+                            except Exception:
+                                pass
+                        raise ccxt.NetworkError(
+                            f"maker 진입·포지션 조회 모두 실패 — 진입 스킵(수동 확인 요망): {symbol}"
+                        )
+                    if symbol in _open_syms:
                         ep, contracts = None, None
                         try:
                             for pp in self.exchange.fetch_positions([symbol]):
@@ -332,9 +366,15 @@ class LiveBroker:
                     time.sleep(2 ** _attempt)
                 except ccxt.NetworkError as e:
                     logger.warning("네트워크 오류, 재시도 %d/3: %s", _attempt + 1, e)
-                    # 이미 체결됐을 수 있으므로 포지션 확인
+                    # 이미 체결됐을 수 있으므로 포지션 확인.
+                    # 조회까지 실패(None)면 체결 여부 미상 — 맹목 재주문은 이중 진입
+                    # 위험이라 이번 진입을 중단한다 (아래 flag, inner except에 안 삼켜지게).
+                    _abort_unknown = False
                     try:
-                        if symbol in self.fetch_open_symbols():
+                        _open_syms = self._fetch_open_symbols_retry()
+                        if _open_syms is None:
+                            _abort_unknown = True
+                        elif symbol in _open_syms:
                             logger.info("네트워크 오류지만 포지션 존재 확인 — 체결된 것으로 간주: %s", symbol)
                             # 포지션이 실재하면 result를 절대 None으로 두지 않는다 — None이면
                             # 아래 raise→호출자 스킵→SL/TP 없는 고아 포지션이 남는다.
@@ -360,6 +400,10 @@ class LiveBroker:
                             break
                     except Exception:
                         pass
+                    if _abort_unknown:
+                        raise ccxt.NetworkError(
+                            f"주문 상태·포지션 조회 모두 실패 — 진입 중단(이중주문 방지): {symbol}"
+                        )
                     time.sleep(1)
                 except ccxt.ExchangeError as e:
                     logger.error("거래소 오류: %s", e)
@@ -371,8 +415,14 @@ class LiveBroker:
         # 실제 체결 수량×체결가 = 실제 노셔널 → tracker가 거래소와 동일 size 기록
         order.size_usd = final_qty * fill_price
         fee_info   = result.get("fee") or {}
-        commission = float(fee_info.get("cost") or self.commission.calculate(order.size_usd, OrderType.MARKET))
-        ts         = pd.Timestamp.now(tz="UTC")
+        # 수수료는 USDT 표기일 때만 실측 사용 — feeBurn ON 계정은 currency='BNB'/cost=BNB수량이라
+        # 그대로 쓰면 수백 배 과소 기록. 비USDT면 모델값 폴백.
+        _fee_cost = fee_info.get("cost")
+        _fee_cur = (fee_info.get("currency") or "USDT").upper()
+        commission = (float(_fee_cost) if _fee_cost and _fee_cur == "USDT"
+                      else self.commission.calculate(order.size_usd, OrderType.MARKET))
+        # 백테 패리티: opened_at = 신호봉 close 시각 (벽시계면 max_hold 타임아웃이 1봉 밀림)
+        ts         = order.timestamp if order.timestamp is not None else pd.Timestamp.now(tz="UTC")
 
         fill = Fill(
             order=order,
@@ -490,8 +540,12 @@ class LiveBroker:
             logger.warning("fetch_my_trades 실패 %s: %s", symbol, e)
         return None
 
-    def fetch_open_symbols(self) -> set[str]:
-        """거래소에서 현재 열려있는 포지션 심볼 집합 반환 (sync 용)."""
+    def fetch_open_symbols(self) -> set[str] | None:
+        """거래소에서 현재 열려있는 포지션 심볼 집합 반환 (sync 용).
+
+        조회 실패 시 None — 빈 집합("포지션 없음")과 반드시 구분할 것.
+        실패를 빈 집합으로 반환하면 호출부가 전 포지션을 stale로 오판해
+        가짜 청산·SL 취소·중복 진입 연쇄가 발생한다 (2026-07-04 감사 CRITICAL)."""
         try:
             positions = self.exchange.fetch_positions()
             return {
@@ -500,8 +554,18 @@ class LiveBroker:
                 if float(p.get("contracts") or 0) != 0
             }
         except Exception as e:
-            logger.warning("fetch_positions 실패: %s", e)
-            return set()
+            logger.warning("fetch_positions 실패 (판단 보류): %s", e)
+            return None
+
+    def _fetch_open_symbols_retry(self, retries: int = 3, wait: float = 1.0) -> set[str] | None:
+        """fetch_open_symbols 재시도 래퍼 — 전부 실패 시 None(불확실)."""
+        for attempt in range(retries):
+            result = self.fetch_open_symbols()
+            if result is not None:
+                return result
+            if attempt < retries - 1:
+                time.sleep(wait * (attempt + 1))
+        return None
 
     def _try_maker_close(self, symbol: str, close_side: str, qty: float,
                          ref_price: float) -> float:

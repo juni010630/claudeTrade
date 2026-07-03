@@ -108,6 +108,15 @@ class LiveFeed:
 
     # ── 펀딩비 조회 ───────────────────────────────────────────────────
     def _fetch_funding(self, symbol: str) -> float:
+        # 백테 패리티: 백테 캐시는 '직전 정산 확정 rate'의 as-of 룩업 — 라이브도 동일
+        # 의미로 정렬. fetch_funding_rate는 차기 정산 예측치라 scorer 펀딩 점수(±0.0003
+        # 임계)가 백테와 갈라진다. 실패 시 예측치 → 0.0 순 폴백.
+        try:
+            hist = self.exchange.fetch_funding_rate_history(symbol, limit=1)
+            if hist:
+                return float(hist[-1].get("fundingRate") or 0.0)
+        except Exception:
+            pass
         try:
             info = self.exchange.fetch_funding_rate(symbol)
             return float(info.get("fundingRate") or 0.0)
@@ -119,37 +128,42 @@ class LiveFeed:
         """지금 당장 MarketSnapshot 을 만들어 반환."""
         bars: dict[str, dict[str, pd.DataFrame]] = {}
         funding: dict[str, float] = {}
-        snap_ts = None  # 실제 마감된 봉 기준 타임스탬프
+        pf_closes: dict[str, pd.Timestamp] = {}  # 심볼별 primary 최신 완성봉 close
 
         for sym in self.symbols:
             bars[sym] = {}
             for tf in self.timeframes:
                 df = self._fetch_bars_with_freshness(sym, tf)
-                if df.empty or len(df) < 2:
-                    logger.warning("빈 데이터: %s %s — skip", sym, tf)
-                    bars[sym][tf] = df.reset_index() if not df.empty else df
-                    continue
                 # 마지막 봉이 아직 미완성(close time이 미래)일 때만 제외.
                 # 경계 직후(HH:00:0X) fetch 시 거래소가 forming 봉을 아직 안 주면 df의
                 # 마지막은 '직전 완성봉'이므로 무조건 떨구면 snapshot이 1h stale이 됨
                 # (봉 #N 타임스탬프가 1시간 밀려 슬리브 hour==0 게이트가 안 열림). 완성봉이면 유지.
+                # (빈 검사보다 먼저 — 1행 프레임의 forming 봉이 완성봉처럼 통과하지 않도록)
                 tf_mins = self.TF_MINS.get(tf, 60)
-                last_close = df.index[-1] + pd.Timedelta(minutes=tf_mins)
-                if last_close > pd.Timestamp.now(tz="UTC") + pd.Timedelta(seconds=30):
-                    df = df.iloc[:-1]  # forming 봉만 제외 (30s = 시계오차 여유)
+                if not df.empty:
+                    last_close = df.index[-1] + pd.Timedelta(minutes=tf_mins)
+                    if last_close > pd.Timestamp.now(tz="UTC") + pd.Timedelta(seconds=30):
+                        df = df.iloc[:-1]  # forming 봉만 제외 (30s = 시계오차 여유)
+                if df.empty:
+                    logger.warning("빈 데이터: %s %s — skip", sym, tf)
+                    bars[sym][tf] = df.reset_index() if df.index.name == "timestamp" else df
+                    continue
                 closed = df.iloc[-self.lookback:]
                 bars[sym][tf] = closed.reset_index()
-                # primary_tf 기준으로 실제 타임스탬프 결정
-                if tf == self.primary_tf and snap_ts is None and not closed.empty:
-                    snap_ts = closed.index[-1] + pd.Timedelta(minutes=self.TF_MINS.get(self.primary_tf, 60))
+                if tf == self.primary_tf:
+                    pf_closes[sym] = closed.index[-1] + pd.Timedelta(minutes=tf_mins)
             funding[sym] = self._fetch_funding(sym)
             time.sleep(self.exchange.rateLimit / 1000 * 0.5)
+
+        # 타임스탬프 앵커 = 전 심볼 primary 완성봉 close의 최대값.
+        # 첫 심볼(ETH) 단독 앵커는 그 심볼이 1봉 stale이면 전 심볼 hour 게이트/펀딩
+        # 버킷이 1시간 밀리고 stale 제외 검사도 무력화된다 — max면 양쪽 다 견고.
+        snap_ts = max(pf_closes.values()) if pf_closes else None
 
         # 심볼별 staleness 방어: 한 심볼의 primary_tf 최신 완성봉이 snap_ts보다 1봉
         # 이상 뒤처지면(15회 재시도 실패로 stale fetch) 그 심볼을 snapshot에서 제외 —
         # stale 가격에 신호/MTM이 작동하지 않게 한다. 전역 snapshot staleness는
-        # live_trade가 별도(7200s)로 가드하지만, 그 기준 타임스탬프는 첫(fresh) 심볼에서
-        # 와서 단일 심볼 지연은 못 잡으므로 여기서 심볼 단위로 차단한다.
+        # live_trade가 별도(7200s)로 가드한다.
         if snap_ts is not None:
             pf = self.primary_tf
             pf_mins = self.TF_MINS.get(pf, 60)
@@ -157,6 +171,12 @@ class LiveFeed:
             for sym in list(bars.keys()):
                 pdf = bars[sym].get(pf)
                 if pdf is None or len(pdf) == 0:
+                    # primary 프레임이 비면(30초 연속 fetch 실패) 심볼 제외 — 남기면
+                    # 엔진 _get_bars가 4h/1d 봉으로 폴백해 진입 전 가격대의 high/low로
+                    # TP/SL을 오판정, 실포지션을 오청산한다.
+                    logger.warning("심볼 제외: %s primary(%s) 데이터 없음", sym, pf)
+                    bars.pop(sym, None)
+                    funding.pop(sym, None)
                     continue
                 pf_close = pdf["timestamp"].iloc[-1] + pd.Timedelta(minutes=pf_mins)
                 if snap_ts - pf_close >= tol:  # 1봉 이상 뒤처지면 제외 (== 1봉도 stale)
@@ -166,6 +186,23 @@ class LiveFeed:
                     )
                     bars.pop(sym, None)
                     funding.pop(sym, None)
+                    continue
+                # 비-primary TF(4h/1d) stale 검사: 기대 마지막 close보다 뒤처지면 그 TF
+                # 프레임만 비운다 — "신선한 1h 트리거 + 낡은 상위TF 필터"라는 백테에 없는
+                # 신호 조합 차단. 1h 기반 TP/SL·MTM은 유지(전략 가드가 빈 프레임=무신호).
+                for tf in self.timeframes:
+                    if tf == pf:
+                        continue
+                    tdf = bars[sym].get(tf)
+                    if tdf is None or len(tdf) == 0:
+                        continue
+                    tf_mins = self.TF_MINS.get(tf, 60)
+                    expected_close = snap_ts.floor(f"{tf_mins}min")
+                    tf_close = tdf["timestamp"].iloc[-1] + pd.Timedelta(minutes=tf_mins)
+                    if tf_close < expected_close:
+                        logger.warning("stale %s 프레임 제외: %s close=%s < 기대 %s",
+                                       tf, sym, tf_close, expected_close)
+                        bars[sym][tf] = tdf.iloc[0:0]
 
         # 폴백: 타임스탬프를 결정 못한 경우 현재 시각 floor
         if snap_ts is None:

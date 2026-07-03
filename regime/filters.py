@@ -19,6 +19,8 @@ _ELIGIBLE_REGIMES: dict[str, set[MarketRegime]] = {
     "volume_imbalance":   _ALL_REGIMES,
     # 15m 모멘텀 브레이크아웃 (Scalp 검증 포팅) — 국면 무게이트 (Scalp 벡터화와 동일)
     "momentum_breakout":  _ALL_REGIMES,
+    # 망치+거래량 (기각·off 보존) — 미등록이면 config로 켜도 신호 0이라 재실험 불가
+    "hammer_vol":         _ALL_REGIMES,
 }
 
 

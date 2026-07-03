@@ -1,11 +1,14 @@
 """ccxt 기반 Binance OHLCV + 펀딩비 다운로더."""
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timezone
 
 import ccxt
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 class OHLCVFetcher:
@@ -61,6 +64,18 @@ class OHLCVFetcher:
         current_open = now.floor(f"{tf_mins}min")
         df = df[df["timestamp"] < current_open]
         df = df.drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
+        # short-page 조기종료 검증: 요청 범위 대비 마지막 봉이 1봉 이상 못 미치면 경고 —
+        # 거래소가 일시적으로 limit 미만 페이지를 주면 잔여 범위가 무음 스킵돼 캐시 갭이 됨
+        if not df.empty:
+            tf_ms = tf_mins * 60_000
+            expected_last = (min(until_ms, int(current_open.value // 1_000_000)) - tf_ms)
+            actual_last = int(df["timestamp"].iloc[-1].value // 1_000_000)
+            if expected_last - actual_last >= tf_ms:
+                logger.warning(
+                    "%s %s 다운로드 조기종료 의심: 마지막 봉 %s < 기대 %s — 재실행 권장",
+                    symbol, timeframe, df["timestamp"].iloc[-1],
+                    pd.Timestamp(expected_last, unit="ms", tz="UTC"),
+                )
         return df
 
 

@@ -105,6 +105,23 @@ class DataLoader:
                 len(gapped), len(self.symbols), self.primary_tf,
                 worst[1], worst[0], worst[2],
             )
+        # 펀딩 캐시 갭도 동일 경고 — searchsorted as-of 룩업이라 갭 구간엔 마지막 rate가
+        # 무기한 고정 부과됨 (8h 정상 간격의 3배 초과 = 갭)
+        f_gapped = []
+        for sym in self.symbols:
+            fidx = self._funding[sym].index
+            if len(fidx) < 2:
+                continue
+            fdiffs = fidx.to_series().diff()
+            fbig = fdiffs[fdiffs > pd.Timedelta(hours=8) * max_factor]
+            if len(fbig):
+                f_gapped.append((sym, fbig.max()))
+        if f_gapped:
+            fworst = max(f_gapped, key=lambda x: x[1])
+            logger.warning(
+                "펀딩 캐시 갭 감지: %d/%d 심볼 — 최악 %s (%s). 갭 구간은 stale rate 고정 부과.",
+                len(f_gapped), len(self.symbols), fworst[1], fworst[0],
+            )
 
     def iterate(
         self,

@@ -31,9 +31,20 @@ class RegimeDetector:
         self.bb_width_squeeze_pct = bb_width_squeeze_pct
         self.primary_symbol = primary_symbol
         self.primary_tf = primary_tf
+        self._last_state: RegimeState | None = None
 
     def classify(self, snapshot: MarketSnapshot) -> RegimeState:
-        df = snapshot.bars[self.primary_symbol][self.primary_tf]
+        df = snapshot.bars.get(self.primary_symbol, {}).get(self.primary_tf)
+        if df is None or len(df) <= self.adx_period + 1:
+            # 기준 심볼(ETH) 프레임 부재/부족 (라이브 fetch 실패로 심볼 제외 등) —
+            # iloc[-1] 크래시로 봇 전체가 죽는 대신 직전 국면 유지, 콜드스타트는
+            # RANGING(추세 진입 차단 = 보수) 폴백. 백테 로더는 항상 프레임 제공 → 미발동.
+            if self._last_state is not None:
+                return self._last_state
+            return RegimeState(
+                regime=MarketRegime.RANGING, adx=0.0, bb_width=0.0,
+                bb_width_pct=1.0, timestamp=snapshot.timestamp,
+            )
 
         adx_series = calc_adx(df, self.adx_period)
         bw_series = calc_bb_width(df, self.bb_period, self.bb_std)
@@ -56,10 +67,12 @@ class RegimeDetector:
             # 전환 구간 (20~25): 추세장으로 처리
             regime = MarketRegime.TRENDING
 
-        return RegimeState(
+        state = RegimeState(
             regime=regime,
             adx=current_adx,
             bb_width=current_bw,
             bb_width_pct=pct_rank,
             timestamp=snapshot.timestamp,
         )
+        self._last_state = state
+        return state

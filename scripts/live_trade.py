@@ -303,6 +303,10 @@ def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None 
         equity_curve_trading=p.get("equity_curve_trading", 0),
         adx_scaling=p.get("adx_scaling", False),
         abort_mdd_threshold=r.get("deep_floor_dd"),  # 딥플로어 — 루프에서 _aborted 감지 시 전량청산+정지
+        tp_round_snap=p.get("tp_round_snap", {}).get("enabled", False),
+        tp_round_mode=p.get("tp_round_snap", {}).get("mode", "big"),
+        tp_round_max_pullin=p.get("tp_round_snap", {}).get("max_pullin", 0.33),
+        tp_round_offset=p.get("tp_round_snap", {}).get("offset", 0.0),
         notifier=notifier,
         trade_log_path="trades.csv",
     )
@@ -424,8 +428,28 @@ def main() -> None:
     # state 복원 (이전 크래시 시 포지션/equity 유지)
     saved = state_store.load()
     if saved is not None and saved.positions:
-        # 거래소에 실제로 열린 포지션과 교차 검증
+        # 거래소에 실제로 열린 포지션과 교차 검증. 조회 실패(None)면 진행 금지 —
+        # "포지션 0"으로 오판해 신규 시작하면 실포지션이 봇 인지 밖에서 표류한다.
+        # 종료 후 systemd 재시작(30s)이 자연 재시도.
         exchange_syms = broker.fetch_open_symbols()
+        if exchange_syms is None:
+            for _retry in range(3):
+                time.sleep(5)
+                exchange_syms = broker.fetch_open_symbols()
+                if exchange_syms is not None:
+                    break
+        if exchange_syms is None:
+            logger.critical("거래소 포지션 조회 반복 실패 — 복원 불가, 종료(재시작 대기)")
+            if notifier and notifier.enabled:
+                try:
+                    notifier.notify_info(
+                        "🚨 <b>기동 실패 — 포지션 조회 불가</b>\n"
+                        "저장된 포지션이 있으나 거래소 조회가 계속 실패. "
+                        "복원 없이 진행하면 실포지션 미관리 위험 → 재시작 대기"
+                    )
+                except Exception:
+                    pass
+            raise SystemExit(1)
         restored = 0
         skipped_unreal = 0.0
         for sym, pos in list(saved.positions.items()):
@@ -453,8 +477,17 @@ def main() -> None:
                 engine.tracker.state.cash = saved.cash
             engine.tracker.state.equity = usdt if usdt else saved.equity
             engine.tracker.state.daily_start_equity = saved.daily_start_equity
-            # 같은 날 재시작 시 reset_daily() 건너뛰도록 _last_day 설정
-            engine._last_day = pd.Timestamp.now(tz="UTC")
+            # 같은 날 재시작일 때만 reset_daily() 건너뜀 — 자정을 넘겨 복구된 경우
+            # _last_day를 지금으로 찍으면 그날 리셋이 통째로 스킵돼 daily_start_equity가
+            # 전일 값으로 남는다. 마지막 저장 시각(state.json mtime)이 오늘이 아니면
+            # None 유지 → 첫 봉에서 reset_daily 실행.
+            try:
+                _saved_at = pd.Timestamp(
+                    state_store.DEFAULT_PATH.stat().st_mtime, unit="s", tz="UTC")
+            except Exception:
+                _saved_at = None
+            if _saved_at is not None and _saved_at.date() == pd.Timestamp.now(tz="UTC").date():
+                engine._last_day = pd.Timestamp.now(tz="UTC")
             # cash가 실잔고로 재앵커링됨(실잔고엔 이미 정산 펀딩 반영) → 현재 펀딩 버킷을
             # '정산됨'으로 표시해 첫 봉에서 같은 버킷 펀딩 중복부과 방지
             engine.funding_sim.sync_to(pd.Timestamp.now(tz="UTC"))
@@ -677,8 +710,15 @@ def main() -> None:
                     with engine_lock:
                         prices = engine._get_prices(snapshot)
                         for sym in list(state.positions.keys()):
-                            engine._force_close(sym, prices.get(sym, 0.0),
-                                                snapshot.timestamp, "deep_floor")
+                            # 청산 실패 시 재시도 — market_close가 TP/SL 취소 후 청산이라
+                            # 실패 시 SL 없는 나체 포지션이 폭락장에 방치됨. 3회 재시도 후
+                            # 잔존분은 기존 텔레그램 경보(emergency_stop 안내)로 위임.
+                            for _attempt in range(3):
+                                engine._force_close(sym, prices.get(sym, 0.0),
+                                                    snapshot.timestamp, "deep_floor")
+                                if sym not in engine.tracker.snapshot().positions:
+                                    break
+                                time.sleep(2)
                         state = engine.tracker.snapshot()
                     state_store.save(state, engine=engine)
                     if notifier and notifier.enabled:
