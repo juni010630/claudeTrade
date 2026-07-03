@@ -1162,6 +1162,15 @@ class BacktestEngine:
         for sym, pos in list(state.positions.items()):
             bar = bars.get(sym)
             if bar is None:
+                # 데이터 부재(stale 제외/상폐)여도 max_hold 타임아웃은 시간 규칙이라 집행 —
+                # 안 하면 상폐 심볼 포지션이 백테 종료까지 슬롯·상관 집계를 영구 점유.
+                # 체결가 = 직전 mark (이월 unrealized와 일치, _liq_price 규칙).
+                hold_limit = self._strategy_max_hold_hours.get(pos.strategy, self.max_hold_hours)
+                if hold_limit is not None and \
+                        (snapshot.timestamp - pos.opened_at).total_seconds() / 3600 >= hold_limit:
+                    self._close_with_reason(
+                        sym, pos, self._liq_price(sym, pos, {}), "timeout", snapshot, regime
+                    )
                 continue
 
             close = float(bar["close"])
