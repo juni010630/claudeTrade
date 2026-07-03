@@ -729,9 +729,12 @@ class BacktestEngine:
             if cand["symbol"] not in prices:
                 continue
 
-            # 티어별 심볼 차단
+            # 티어별 심볼 차단 — 위성 게이트(v15)는 메인 북 전용. 격리 북(macross_d)은
+            # strategy_fixed_tier "A"가 tier_block_symbols.A와 충돌해 자기 유니버스에
+            # 명시된 FILUSDT가 무음 차단(78→77)되므로 제외.
             tier_blocked = self._tier_block_symbols.get(cand["tier"])
-            if tier_blocked and cand["symbol"] in tier_blocked:
+            if (tier_blocked and cand["symbol"] in tier_blocked
+                    and cand["strategy"] not in self._strategy_guard_isolated):
                 continue
 
             if cand["strategy"] not in self._strategy_guard_isolated:  # 격리 북 = CB 면제 (파국 방어는 딥플로어)
