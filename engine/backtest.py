@@ -598,7 +598,7 @@ class BacktestEngine:
                     last_trade = self.ledger._records[-1] if self.ledger._records else None
                     if pos.strategy not in self._strategy_guard_isolated:  # 격리 북 = CB 미기록
                         self.circuit_breaker.record_result(
-                            pos.strategy, last_trade is not None and last_trade.pnl > 0
+                            pos.strategy, last_trade is not None and last_trade.pnl > 0, now
                         )
                     # 잔여 주문 정리 — 특히 비-reduceOnly 피라미드 STOP은
                     # 포지션 청산 후에도 살아남아 고아 포지션을 열 수 있음
@@ -1415,7 +1415,7 @@ class BacktestEngine:
         last_trade = self.ledger._records[-1] if self.ledger._records else None
         is_win = last_trade is not None and last_trade.pnl > 0
         if pos.strategy not in self._strategy_guard_isolated:  # 격리 북 = CB 미기록 (글로벌 카운터 오염 방지)
-            self.circuit_breaker.record_result(pos.strategy, is_win)
+            self.circuit_breaker.record_result(pos.strategy, is_win, snapshot.timestamp)
 
         # TP Reversal: TP 히트 시 반대 방향으로 동일 사이즈 진입
         if (self._tp_reversal and exit_reason == "tp"
@@ -1863,4 +1863,4 @@ class BacktestEngine:
         if reason in ("forced_stop", "early_exit") and pos.strategy not in self._strategy_guard_isolated:
             last = self.ledger._records[-1] if self.ledger._records else None
             if last is not None:
-                self.circuit_breaker.record_result(pos.strategy, last.pnl > 0)
+                self.circuit_breaker.record_result(pos.strategy, last.pnl > 0, now)

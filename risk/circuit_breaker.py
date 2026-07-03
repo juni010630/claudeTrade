@@ -24,13 +24,25 @@ class CircuitBreaker:
     _global_losses: int = 0
     _global_stopped_until: pd.Timestamp | None = None
 
-    def record_result(self, strategy: str, is_win: bool) -> None:
+    def record_result(self, strategy: str, is_win: bool,
+                      now: pd.Timestamp | None = None) -> None:
+        """손익 기록. now 제공 시 임계 도달 즉시 그 시각 기준으로 정지 시작 —
+        미제공(구 시그니처)이면 다음 get_status 호출 시각 앵커(구 동작 폴백).
+        지연 앵커는 연패 후 첫 시그널이 경과 시간 무관 무조건 차단되는 스펙 이탈."""
         if is_win:
             self._strategy_losses[strategy] = 0
             self._global_losses = 0
-        else:
-            self._strategy_losses[strategy] = self._strategy_losses.get(strategy, 0) + 1
-            self._global_losses += 1
+            return
+        self._strategy_losses[strategy] = self._strategy_losses.get(strategy, 0) + 1
+        self._global_losses += 1
+        if now is not None:
+            if self._global_losses >= self.global_stop_losses \
+                    and self._global_stopped_until is None:
+                self._global_stopped_until = now + pd.Timedelta(hours=self.pause_duration_hours)
+            if self._strategy_losses[strategy] >= self.strategy_pause_losses:
+                self._strategy_paused_until[strategy] = (
+                    now + pd.Timedelta(hours=self.pause_duration_hours))
+                self._strategy_losses[strategy] = 0  # 카운터 리셋 (get_status 지연경로와 동일)
 
     def get_status(self, strategy: str, now: pd.Timestamp) -> BreakerStatus:
         # 전체 중단: 자동 해제 (pause_duration_hours 경과 시)

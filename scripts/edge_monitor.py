@@ -338,7 +338,7 @@ def _cb_status_at(history, strategy, t, iso_set, g):
     for h in closed:
         if h["exit_time"] >= t:
             break
-        cb.record_result(h["strategy"], (h["pnl"] or 0) > 0)
+        cb.record_result(h["strategy"], (h["pnl"] or 0) > 0, h["exit_time"])
         cb.get_status(h["strategy"], h["exit_time"])
     return cb.get_status(strategy, t)
 

@@ -198,5 +198,6 @@ class SLPoller:
                 if (last_trade is not None
                         and close_info["strategy"] not in self.engine._strategy_guard_isolated):
                     self.engine.circuit_breaker.record_result(
-                        close_info["strategy"], last_trade.pnl > 0
+                        close_info["strategy"], last_trade.pnl > 0,
+                        pd.Timestamp.now(tz="UTC"),
                     )
