@@ -248,3 +248,14 @@ cmax4030: Sh1.962→2.299 / MDD-26.9→-24.3 / 2023+14→+54 / 전연도 우월 
 - 라이브 패리티 확정(live_trade도 engine._process_bar 매봉 호출 = check_early_exit 동일 실행), 코드 0줄, 자유도 1
 - 메커니즘: 추세책이 반대 모멘텀 시 청산(+반대 풀시그널 동봉 시 자동 reverse) = 추세반전 되돌림 회피
 → **v21d = config/final_v21d_eexit.yaml (v21c + ema·multi early_exit_on_opp:true). 배포 제안.** (macross/MR 확장은 신규코드/기각영역이라 보류)
+
+## WAVE 19 — MR·macross 주봉(1w) 사전점검 ❌ 기각 (엔진 배선 전 신호검증)
+1d→1w 리샘플, 전방수익 IS/OOS (weekly_sleeve_check.py):
+- **MR 주봉 RSI<30 롱: IS 음수**(1/2/4주 -0.5/-1.5/-3.4%, 승률↓) — 주봉 과매도=하락추세 지속(falling knife), 평균회귀 전제 붕괴. MR은 단기 반등 본질. 기각.
+- **macross 주봉 EMA20/100·10/40: 호라이즌·IS/OOS 비일관 노이즈**(소표본, 주 ~220개; EMA100주봉=2년 워밍업 laggy). 10/40 2주만 IS+5.6/OOS+4.7이나 다중검정 노이즈 공산. 일봉이 검증 챔피언.
+→ **두 슬리브 다 주봉 부적합. 현행 1d 유지.** 엔진 통합 안 함(신호점검서 음수/노이즈).
+
+## WAVE 20 — MR·macross 4h 사전점검 ❌ 기각 (fourh_sleeve_check.py)
+- **MR 4h RSI<30 롱(2475신호): IS≈0(flat)·OOS-only 양수**(48h IS+0.04/OOS+2.44, net50 IS음수) = 레짐특이(2025-26불장만), 비강건. 하드구간(2022-24) 엣지 0.
+- **macross 4h EMA20/100: IS+/OOS- 부호반전**(노이즈), 10/40: ~0·비용후 음수. 빠른크로스=휩쏘+턴오버.
+→ **슬리브 TF 완전 소진: 1d가 정답.** MR=너무짧으면(1h/4h) 하드구간 엣지없음·너무길면(1w) falling knife, 1d 스위트스팟. macross=느린 1d크로스가 검증 챔피언. 라이브 v21d(1d 슬리브) 유지.
