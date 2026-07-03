@@ -252,6 +252,10 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         strategy_size_bonus_mult=engine_kwargs.pop("strategy_size_bonus_mult", p.get("strategy_size_bonus_mult", 1.5)),
         tp_reversal=engine_kwargs.pop("tp_reversal", False),
         tp_extend_on_signal=engine_kwargs.pop("tp_extend_on_signal", False),
+        tp_round_snap=engine_kwargs.pop("tp_round_snap", p.get("tp_round_snap", {}).get("enabled", False)),
+        tp_round_mode=engine_kwargs.pop("tp_round_mode", p.get("tp_round_snap", {}).get("mode", "big")),
+        tp_round_max_pullin=engine_kwargs.pop("tp_round_max_pullin", p.get("tp_round_snap", {}).get("max_pullin", 0.33)),
+        tp_round_offset=engine_kwargs.pop("tp_round_offset", p.get("tp_round_snap", {}).get("offset", 0.0)),
         pyramid_trigger_r=(p.get("pyramid", {}).get("trigger_r")
                            if p.get("pyramid", {}).get("enabled") else None),
         pyramid_add_fraction=p.get("pyramid", {}).get("add_fraction", 0.5),
