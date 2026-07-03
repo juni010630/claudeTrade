@@ -9,13 +9,27 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
+import pandas as pd
+import pytest
 import yaml
 
 from scripts.run_backtest import build_engine as build_bt
 from scripts.live_trade import build_engine as build_live
 from execution.live_broker import LiveBroker
 
-CONFIG = Path(__file__).resolve().parents[2] / "config" / "final_v17.yaml"
+_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+# 현 라이브 config 필수 — v17만 고정하면 v21d 신규 키(격리북/고정티어/dvol_perbook/
+# 딥플로어/조기청산 등)의 한쪽 배선 누락을 못 잡는다 (2026-07-04 감사)
+CONFIGS = ["final_v17.yaml", "final_v21d_eexit.yaml"]
+
+
+def _norm(v):
+    """DataFrame 등 == 비교 불가 타입 정규화."""
+    if isinstance(v, pd.DataFrame):
+        return v.to_csv()
+    if isinstance(v, pd.Series):
+        return v.to_string()
+    return v
 
 
 def _params(e) -> dict:
@@ -32,8 +46,18 @@ def _params(e) -> dict:
         "_rsi_mom_period", "_vol_target", "_vol_scale_min", "_vol_scale_max", "_vol_lookback",
         "_btc_mom_gate", "_btc_mom_opp_w", "_btc_mom_lookback", "_equity_curve_trading",
         "_adx_scaling",
+        # v21d 계열 신규 키 (2026-07-04 감사에서 테스트 사각 지적 — 전수 추가)
+        "_strategy_fixed_tier", "_strategy_max_hold_hours", "_strategy_guard_isolated",
+        "_cap_frac_sched", "_size_scale_sched", "_pool_map", "_pool_fractions",
+        "_gap_sl_pessimistic", "_isolated_margin", "_mm_rate", "_subbar_tpsl",
+        "_abort_mdd", "_tp_reversal", "_tp_extend_on_signal",
+        "_sl_reversal", "_sl_reversal_leverage",
+        "_tp_round_snap", "_tp_round_mode", "_tp_round_max_pullin", "_tp_round_offset",
     ]:
-        d[a] = getattr(e, a)
+        d[a] = _norm(getattr(e, a))
+    # 수수료/슬리피지 요율
+    d["commission"] = (e._commission.maker_rate, e._commission.taker_rate)
+    d["slippage"] = e._slippage.default_bps
 
     s = e.sizer
     d["sizer"] = (s.risk_per_trade, s._cfg, s.max_notional_usd, s.max_notional_equity_mult)
@@ -66,15 +90,23 @@ def _params(e) -> dict:
                    rd.bb_width_lookback, rd.bb_width_squeeze_pct, rd.primary_symbol, rd.primary_tf)
 
     d["funding"] = e.funding_sim.interval_hours
+    # 전략 전체 파라미터 대조 — (name, tf, symbols) 3-튜플만 보면 atr 배수·
+    # early_exit_on_opp 등 내부 파라미터 불일치를 못 잡는다
     d["strategies"] = sorted(
-        (st.name, getattr(st, "signal_tf", None), tuple(getattr(st, "symbols", ())))
+        (st.name, tuple(sorted(
+            (k, _norm(tuple(v) if isinstance(v, list) else
+                      tuple(sorted(v.items())) if isinstance(v, dict) else v))
+            for k, v in st.__dict__.items()
+            if isinstance(v, (int, float, str, bool, list, dict, tuple, type(None)))
+        )))
         for st in e.strategies
     )
     return d
 
 
-def test_build_engine_parity():
-    raw = yaml.safe_load(CONFIG.read_text())
+@pytest.mark.parametrize("config_name", CONFIGS)
+def test_build_engine_parity(config_name):
+    raw = yaml.safe_load((_CONFIG_DIR / config_name).read_text())
     # build_engine은 config dict를 in-place 변형(cfg.setdefault 등) → 각자 deepcopy 사용
     bt = build_bt(copy.deepcopy(raw), initial_capital=100.0)
     broker = LiveBroker(exchange=object(), dry_run=True)  # __init__은 exchange 미사용
@@ -82,4 +114,4 @@ def test_build_engine_parity():
 
     p_bt, p_live = _params(bt), _params(live)
     diffs = {k: (p_bt[k], p_live[k]) for k in p_bt if p_bt[k] != p_live[k]}
-    assert not diffs, f"백테↔라이브 build_engine 파라미터 불일치: {diffs}"
+    assert not diffs, f"[{config_name}] 백테↔라이브 build_engine 파라미터 불일치: {diffs}"
