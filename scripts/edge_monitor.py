@@ -48,11 +48,11 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("edge_monitor")
 
 # ── 기준점 (재배포 시 갱신) ───────────────────────────────────────
-ANCHOR = pd.Timestamp("2026-06-19 23:00", tz="UTC")  # ⚠️ v21d 실제 재시작 = 06-19 22:48 UTC → 첫 1h봉 23:00.
-#   날짜만(00:00)으로 두면 재시작 전 ~23h를 리플레이가 v21d로 덮어, state.json 이월 포지션(앵커 이전
+ANCHOR = pd.Timestamp("2026-07-03 18:00", tz="UTC")  # 2026-07-03 감사수정 배포(그룹A+B1~B4) 재시작 → 첫 1h봉 18:00.
+#   날짜만(00:00)으로 두면 재시작 전 ~23h를 리플레이가 현행 엔진으로 덮어, state.json 이월 포지션(앵커 이전
 #   진입분)을 flat-start 리플레이가 앵커에서 재진입 → '리플레이에만 존재' 오경보(2026-06-20 UNI/ARPA MR 사례).
-#   v21d = v21c + ema·multi early_exit_on_opp(반대 모멘텀 시 청산/리버스). 사이징·배분·진입 불변,
-#   추세책 일부 포지션이 반대신호 시 조기청산 → v21c 보유분과 전환윈도 '리플레이/라이브전용' 오경보 가능(무시).
+#   이번 배포 = 엔진 동작 변경(CB 앵커·상관정렬·FIL 부활·상폐 타임아웃) 포함 → 구엔진 라이브 이력과의
+#   패리티 오염 방지 위해 ANCHOR 리셋(2026-07-04 감사). 이월 포지션의 전환윈도 오경보 가능(무시).
 #   재배포 시 ANCHOR = 실제 systemctl 재시작 시각의 다음 1h봉 경계로 갱신할 것(systemctl show -p ExecMainStartTimestamp).
 CONFIG = "config/final_v21d_eexit.yaml"   # 2026-06-19 v21d 배포 (v21c + 반대신호 조기청산)
 BASELINE = "config/edge_baseline_v21d.json"  # 생성 전엔 ③ 자동 스킵 (31일 누적 후 발동)
