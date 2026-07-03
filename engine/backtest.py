@@ -637,13 +637,18 @@ class BacktestEngine:
         # 2. MTM 업데이트 + 동적 SL + TP/SL 체크
         self.tracker.mark_to_market(prices)
 
-        # 상관계수 필터용 close 시리즈 업데이트
+        # 상관계수 필터용 close 시리즈 업데이트 — timestamp 인덱스로 전달 (RangeIndex면
+        # 윈도 길이가 다른 심볼끼리 시점이 어긋난 상관을 계산: correlation.py 참조)
         for sym in snapshot.bars:
             tf_order = [self.price_tf, "1h", "4h", "1d", "15m", "5m"]
             for tf in tf_order:
                 df = snapshot.bars[sym].get(tf)
                 if df is not None and not df.empty and "close" in df.columns:
-                    self.corr_filter.update(sym, df["close"])
+                    if "timestamp" in df.columns:
+                        ser = pd.Series(df["close"].to_numpy(), index=df["timestamp"].to_numpy())
+                    else:
+                        ser = df["close"]
+                    self.corr_filter.update(sym, ser)
                     break
         # TP/SL + trailing SL을 sub-bar 순회로 통합 처리.
         # dynamic SL 활성 + sub-bar 데이터 존재 시 → 1h sub-bar 순회로 intrabar 경로 재현

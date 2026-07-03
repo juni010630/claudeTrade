@@ -19,8 +19,15 @@ class CorrelationFilter:
         self._corr_matrix: pd.DataFrame = pd.DataFrame()
         self._dirty: bool = False
 
+    # corr()에서 이 미만으로 겹치는 쌍은 NaN(=미차단) — 2~3포인트 겹침의 스퓨리어스 ±1 차단
+    MIN_OVERLAP = 30
+
     def update(self, symbol: str, close_series: pd.Series) -> None:
-        """최신 종가 시리즈로 수익률을 업데이트. 행렬은 lazy 재계산 (is_blocked 읽기 시점)."""
+        """최신 종가 시리즈로 수익률을 업데이트. 행렬은 lazy 재계산 (is_blocked 읽기 시점).
+
+        close_series 인덱스는 timestamp여야 함 — RangeIndex(0..N)로 넘기면 심볼별 윈도
+        길이가 다를 때(신규상장 초기·갭 클램프) 정수 라벨 정렬로 서로 다른 시점끼리
+        상관을 계산해 필터가 무력화된다 (실측: 동일자산 300 vs 200행 → corr 0.106)."""
         self._returns[symbol] = close_series.pct_change().dropna().iloc[-self.lookback :]
         self._dirty = True
 
@@ -28,7 +35,7 @@ class CorrelationFilter:
         # 진입 체크는 해당 봉의 모든 update 완료 후에만 호출되므로 결과는 매 호출 재계산과 비트동일.
         # 다심볼 유니버스에서 봉당 심볼수만큼 풀 행렬 재계산하던 핫스팟 제거.
         if getattr(self, "_dirty", False) and len(self._returns) >= 2:
-            self._corr_matrix = pd.DataFrame(self._returns).corr()
+            self._corr_matrix = pd.DataFrame(self._returns).corr(min_periods=self.MIN_OVERLAP)
             self._dirty = False
 
     def is_blocked(self, signal: Signal, state: PortfolioState) -> bool:
