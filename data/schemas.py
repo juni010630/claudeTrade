@@ -31,5 +31,6 @@ class MarketSnapshot:
     # bars[symbol][timeframe] = DataFrame (OHLCV, 최신 봉이 마지막 행)
     bars: dict[str, dict[str, pd.DataFrame]] = field(default_factory=dict)
     funding_rates: dict[str, float] = field(default_factory=dict)   # symbol → 현재 펀딩비
+    funding_ts: dict[str, pd.Timestamp] = field(default_factory=dict)  # symbol → 직전 정산 시각 (정산 발생 감지용)
     open_interest: dict[str, float] = field(default_factory=dict)   # symbol → OI (USD)
     btc_dominance: float = 0.0

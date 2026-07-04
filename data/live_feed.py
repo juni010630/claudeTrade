@@ -107,27 +107,32 @@ class LiveFeed:
         )
 
     # ── 펀딩비 조회 ───────────────────────────────────────────────────
-    def _fetch_funding(self, symbol: str) -> float:
+    def _fetch_funding(self, symbol: str) -> tuple[float, pd.Timestamp | None]:
         # 백테 패리티: 백테 캐시는 '직전 정산 확정 rate'의 as-of 룩업 — 라이브도 동일
         # 의미로 정렬. fetch_funding_rate는 차기 정산 예측치라 scorer 펀딩 점수(±0.0003
         # 임계)가 백테와 갈라진다. 실패 시 예측치 → 0.0 순 폴백.
+        # 반환 = (rate, 정산 시각) — 정산 시각은 FundingRateSimulator의 정산 발생
+        # 감지용(4h/8h 심볼별 주기 자동). 폴백 경로는 ts 없음 → 시뮬레이터가 8h 버킷.
         try:
             hist = self.exchange.fetch_funding_rate_history(symbol, limit=1)
             if hist:
-                return float(hist[-1].get("fundingRate") or 0.0)
+                ms = hist[-1].get("timestamp")
+                fts = pd.Timestamp(ms, unit="ms", tz="UTC") if ms else None
+                return float(hist[-1].get("fundingRate") or 0.0), fts
         except Exception:
             pass
         try:
             info = self.exchange.fetch_funding_rate(symbol)
-            return float(info.get("fundingRate") or 0.0)
+            return float(info.get("fundingRate") or 0.0), None
         except Exception:
-            return 0.0
+            return 0.0, None
 
     # ── 현재 스냅샷 즉시 생성 ─────────────────────────────────────────
     def snapshot_now(self) -> MarketSnapshot:
         """지금 당장 MarketSnapshot 을 만들어 반환."""
         bars: dict[str, dict[str, pd.DataFrame]] = {}
         funding: dict[str, float] = {}
+        funding_ts: dict[str, pd.Timestamp] = {}
         pf_closes: dict[str, pd.Timestamp] = {}  # 심볼별 primary 최신 완성봉 close
 
         for sym in self.symbols:
@@ -152,7 +157,9 @@ class LiveFeed:
                 bars[sym][tf] = closed.reset_index()
                 if tf == self.primary_tf:
                     pf_closes[sym] = closed.index[-1] + pd.Timedelta(minutes=tf_mins)
-            funding[sym] = self._fetch_funding(sym)
+            funding[sym], _fts = self._fetch_funding(sym)
+            if _fts is not None:
+                funding_ts[sym] = _fts
             time.sleep(self.exchange.rateLimit / 1000 * 0.5)
 
         # 타임스탬프 앵커 = 전 심볼 primary 완성봉 close의 최대값.
@@ -177,6 +184,7 @@ class LiveFeed:
                     logger.warning("심볼 제외: %s primary(%s) 데이터 없음", sym, pf)
                     bars.pop(sym, None)
                     funding.pop(sym, None)
+                    funding_ts.pop(sym, None)
                     continue
                 pf_close = pdf["timestamp"].iloc[-1] + pd.Timedelta(minutes=pf_mins)
                 if snap_ts - pf_close >= tol:  # 1봉 이상 뒤처지면 제외 (== 1봉도 stale)
@@ -186,6 +194,7 @@ class LiveFeed:
                     )
                     bars.pop(sym, None)
                     funding.pop(sym, None)
+                    funding_ts.pop(sym, None)
                     continue
                 # 비-primary TF(4h/1d) stale 검사: 기대 마지막 close보다 뒤처지면 그 TF
                 # 프레임만 비운다 — "신선한 1h 트리거 + 낡은 상위TF 필터"라는 백테에 없는
@@ -214,6 +223,7 @@ class LiveFeed:
             timestamp=snap_ts,
             bars=bars,
             funding_rates=funding,
+            funding_ts=funding_ts,
             open_interest={},
             btc_dominance=0.0,
         )

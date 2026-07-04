@@ -176,11 +176,16 @@ class DataLoader:
                         bars[sym][tf] = sub
 
             funding_rates: dict[str, float] = {}
+            funding_ts: dict[str, pd.Timestamp] = {}
             for sym in self.symbols:
                 fd = self._funding[sym]
                 if not fd.empty:
                     pos = int(np.searchsorted(self._fund_i8[sym], eff_i8, side="right"))
-                    funding_rates[sym] = float(fd["rate"].iloc[pos - 1]) if pos > 0 else 0.0
+                    if pos > 0:
+                        funding_rates[sym] = float(fd["rate"].iloc[pos - 1])
+                        funding_ts[sym] = fd.index[pos - 1]
+                    else:
+                        funding_rates[sym] = 0.0
                 else:
                     funding_rates[sym] = 0.0
 
@@ -188,6 +193,7 @@ class DataLoader:
                 timestamp=effective_time,  # close time 기준 (LiveFeed와 일치)
                 bars=bars,
                 funding_rates=funding_rates,
+                funding_ts=funding_ts,
                 open_interest={},   # 필요 시 별도 캐시에서 로드
                 btc_dominance=0.0,
             )

@@ -629,8 +629,9 @@ class BacktestEngine:
         bars = self._get_bars(snapshot)
         prices = {sym: float(bar["close"]) for sym, bar in bars.items()}
 
-        # 1. 펀딩비 적용 (mark price 기준 notional)
-        accruals = self.funding_sim.accrue(state, now, snapshot.funding_rates, prices=prices)
+        # 1. 펀딩비 적용 (mark price 기준 notional, 정산 ts 전진 감지 = 4h/8h 자동)
+        accruals = self.funding_sim.accrue(state, now, snapshot.funding_rates,
+                                           funding_ts=snapshot.funding_ts, prices=prices)
         if accruals:
             self.tracker.apply_funding(accruals)
 
