@@ -1409,6 +1409,17 @@ class BacktestEngine:
                     logging.getLogger(__name__).error(
                         "broker.market_close 실패 %s: %s — tracker 청산 건너뜀 (고아 방지)", sym, e
                     )
+                    # market_close는 SL/TP를 선취소한 뒤 청산하므로, 청산 실패 시 거래소측
+                    # 보호가 전무한 채 조건 재발까지 방치됨 — TP/SL 재등록으로 복구.
+                    # (SL이 이미 관통된 상태면 -2021로 등록 실패할 수 있으나 다음 봉
+                    #  히트테스트가 재시도, 가격이 되돌아온 경우엔 정상 재등록됨)
+                    if hasattr(self.broker, "refresh_tp_sl_after_add"):
+                        try:
+                            self.broker.refresh_tp_sl_after_add(
+                                sym, pos.direction, qty, pos.tp_price, pos.sl_price)
+                        except Exception as e2:
+                            logging.getLogger(__name__).error(
+                                "청산 실패 후 TP/SL 재등록 실패 %s: %s", sym, e2)
                     return
 
         self.tracker.close_position(

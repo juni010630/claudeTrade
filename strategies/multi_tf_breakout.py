@@ -108,6 +108,11 @@ class MultiTFBreakoutStrategy(BaseStrategy):
                     continue
 
                 # ── 1d EMA 필터 ──
+                # 빈 프레임 = 라이브 1d 피드 저하(stale로 비워짐) — 필터 판정 불가면
+                # 진입 스킵(fail-closed, ema_cross와 대칭). None(1d 미로드 config)과
+                # 상장 초기(len < period, 필터 생략)는 기존 동작 유지 = 백테 비트동일.
+                if df_1d is not None and len(df_1d) == 0:
+                    continue
                 if df_1d is not None and len(df_1d) >= self.daily_ema_period:
                     ema_1d = calc_ema(df_1d, self.daily_ema_period)
                     close_1d = float(df_1d["close"].iloc[-1])

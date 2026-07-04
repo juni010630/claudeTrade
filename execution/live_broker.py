@@ -177,6 +177,7 @@ class LiveBroker:
                     float(o2.get("average") or limit_price))
 
         deadline = time.time() + self._maker_timeout
+        chased = False  # 시장가 추격 발사 여부 — 예외 시 추격 체결 미상 판정에 사용
         try:
             while time.time() < deadline:
                 time.sleep(self._maker_poll)
@@ -213,7 +214,10 @@ class LiveBroker:
                     if status != "open":
                         break
                 if status == "open":
-                    raise RuntimeError(f"지정가 취소 불가 — 이중 진입 방지 위해 추격 중단: {symbol}")
+                    # raise 금지 — 아래 except Exception이 삼켜 시장가 폴백(None)으로
+                    # 흐르면 2배 포지션. 스킵 판정을 직접 반환해야 한다.
+                    logger.error("지정가 취소 불가 — 이중 진입 방지 위해 추격 중단(진입 스킵): %s", symbol)
+                    return {"average": limit_price, "qty": 0.0}
                 if status == "closed" or filled >= qty * 0.999:
                     logger.info("maker 재취소 중 전량 체결: %s @%.6g", symbol, avg)
                     return {"average": avg, "qty": filled if filled > 0 else qty}
@@ -225,6 +229,7 @@ class LiveBroker:
                 remain_p = round(remain, 6)
             if remain_p <= 0:
                 return {"average": avg, "qty": filled} if filled > 0 else None
+            chased = True
             res = self.exchange.create_order(symbol, "market", side, remain_p)
             mkt_px = float(res.get("average") or res.get("price") or limit_price)
             mkt_qty = float(res.get("filled") or remain_p)
@@ -234,7 +239,7 @@ class LiveBroker:
                         symbol, filled, avg, mkt_qty, mkt_px)
             return {"average": wavg, "qty": total}
         except Exception as e:
-            # 미지 상태 — 이중 주문 방지 최우선: 잔여 지정가 정리 후 체결분만 보고.
+            # 미지 상태 — 이중 주문 방지 최우선: 잔여 지정가 정리 후 상태 기반 판정.
             # (진입 시점엔 이 심볼의 열린 주문 = 방금 그 지정가뿐이라 cancel_all 안전)
             logger.error("maker 경로 오류 %s — 정리 시도: %s: %s", symbol, type(e).__name__, e)
             try:
@@ -244,9 +249,18 @@ class LiveBroker:
             for _ in range(3):
                 try:
                     status, filled, avg = _status()
+                    if status == "open":
+                        # 지정가 생존(취소 실패) — 시장가 폴백하면 지정가 추후 체결분과
+                        # 합쳐 2배 포지션 → 스킵 판정(호출자가 실포지션 조회로 채택/스킵)
+                        logger.error("maker 지정가 취소 불가 — 진입 스킵: %s", symbol)
+                        return {"average": limit_price, "qty": 0.0}
+                    if chased:
+                        # 시장가 추격 발사 후 오류 — 추격 체결 여부는 지정가 filled로
+                        # 알 수 없음 → 스킵 판정(호출자가 실포지션으로 확정)
+                        return {"average": avg if filled > 0 else limit_price, "qty": 0.0}
                     if filled > 0:
                         return {"average": avg, "qty": filled}
-                    return None  # 0체결 확인 → 시장가 폴백 안전
+                    return None  # 주문 종결·0체결·추격 전 확인 → 시장가 폴백 안전
                 except Exception:
                     time.sleep(1)
             return {"average": limit_price, "qty": 0.0}  # 확인 불가 → 진입 스킵
@@ -310,6 +324,23 @@ class LiveBroker:
                     # 상태 확인 불가. 지정가가 실제 체결됐을 수 있으므로 거래소 포지션을 직접
                     # 질의 — 실재하면 SL 없는 고아 방지 위해 채택(평단·실수량)하고 아래서 TP/SL
                     # 등록, 미실재면 안전하게 진입 스킵. (시장가 경로 311-336과 동일 패턴)
+                    # 그 전에 잔존 지정가 최종 정리 — 살아있는 채 채택/스킵하면 추후 체결분이
+                    # SL/TP 커버 밖 수량(2배/나체)이 된다. 종결 확인 불가면 강경보.
+                    _residual = None
+                    try:
+                        self.exchange.cancel_all_orders(symbol)
+                        _residual = bool(self.exchange.fetch_open_orders(symbol))
+                    except Exception:
+                        pass
+                    if _residual is not False and self.notifier is not None \
+                            and getattr(self.notifier, "enabled", False):
+                        try:
+                            self.notifier.notify_info(
+                                f"🚨 <b>{symbol}: 진입 지정가 잔존 가능 — 수동 확인 필요</b>\n"
+                                f"취소/종결 확인 실패. 추후 체결 시 SL/TP 커버 밖 수량이 됩니다."
+                            )
+                        except Exception:
+                            pass
                     _open_syms = self._fetch_open_symbols_retry()
                     if _open_syms is None:
                         # 포지션 조회까지 실패 = 체결 여부 완전 미상 — 스킵하되 강경보
