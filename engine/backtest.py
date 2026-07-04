@@ -1386,6 +1386,13 @@ class BacktestEngine:
                         import logging
                         logging.getLogger(__name__).info(
                             "거래소 포지션 이미 청산됨 (TP/SL 체결): %s — tracker만 업데이트", sym)
+                        # 거래소측 체결은 반대 주문(SL 또는 TP)을 안 지움 — 잔존 주문이
+                        # 재진입 포지션을 구 가격에 오청산하는 좀비가 되므로 즉시 정리
+                        if hasattr(self.broker, "cancel_all_orders"):
+                            try:
+                                self.broker.cancel_all_orders(sym)
+                            except Exception:
+                                pass
                         # 실제 체결가 조회 시도 — 성공 시 비용도 실가 기준 재계산
                         # (실체결가엔 슬리피지 기반영 → 모델비용 이중부과 금지)
                         if hasattr(self.broker, "fetch_recent_fill_price"):

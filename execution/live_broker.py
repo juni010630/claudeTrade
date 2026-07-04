@@ -58,6 +58,23 @@ class LiveBroker:
         self._maker_timeout = float(maker_timeout_sec)
         self._maker_poll = float(maker_poll_sec)
 
+    # ── 주문 전체 취소 (일반 + Algo 트리거 주문부) ─────────────────────
+    def _cancel_all_orders_full(self, symbol: str) -> None:
+        """일반 주문부(TP LIMIT 등) + Algo 주문부(STOP_MARKET 등 트리거) 전체 취소.
+
+        바이낸스가 트리거 주문을 별도 Algo 주문부로 분리해 fapi allOpenOrders가
+        못 지운다 (2026-07-04 실증: 청산 후 구 SL이 좀비로 남아 재진입 포지션을
+        구 가격에 오청산 가능). 양쪽을 각각 시도하고 실패는 경고만.
+        """
+        try:
+            self.exchange.cancel_all_orders(symbol)
+        except Exception as e:
+            logger.warning("주문 취소 실패(일반) %s: %s", symbol, e)
+        try:
+            self.exchange.cancel_all_orders(symbol, params={"trigger": True})
+        except Exception as e:
+            logger.warning("주문 취소 실패(트리거) %s: %s", symbol, e)
+
     # ── 레버리지 설정 (중복 호출 방지) ──────────────────────────────
     def _ensure_leverage(self, symbol: str, leverage: int) -> None:
         if self._leverage_cache.get(symbol) == leverage:
@@ -243,7 +260,7 @@ class LiveBroker:
             # (진입 시점엔 이 심볼의 열린 주문 = 방금 그 지정가뿐이라 cancel_all 안전)
             logger.error("maker 경로 오류 %s — 정리 시도: %s: %s", symbol, type(e).__name__, e)
             try:
-                self.exchange.cancel_all_orders(symbol)
+                self._cancel_all_orders_full(symbol)
             except Exception:
                 pass
             for _ in range(3):
@@ -328,7 +345,7 @@ class LiveBroker:
                     # SL/TP 커버 밖 수량(2배/나체)이 된다. 종결 확인 불가면 강경보.
                     _residual = None
                     try:
-                        self.exchange.cancel_all_orders(symbol)
+                        self._cancel_all_orders_full(symbol)
                         _residual = bool(self.exchange.fetch_open_orders(symbol))
                     except Exception:
                         pass
@@ -509,10 +526,7 @@ class LiveBroker:
                         symbol, qty_total, tp_price, sl_price)
             return
         close_side = "sell" if direction == "long" else "buy"
-        try:
-            self.exchange.cancel_all_orders(symbol)
-        except Exception as e:
-            logger.warning("증액 후 주문 취소 실패 %s: %s", symbol, e)
+        self._cancel_all_orders_full(symbol)  # 기존 TP/SL(트리거 포함) 제거 후 재등록
         try:
             qty = self.exchange.amount_to_precision(symbol, qty_total)
         except Exception:
@@ -673,11 +687,8 @@ class LiveBroker:
         if self.dry_run:
             logger.info("[DRY] market_close: %s %s qty=%s", symbol, direction, qty)
             return
-        # 1) 남은 TP 주문 취소
-        try:
-            self.exchange.cancel_all_orders(symbol)
-        except Exception as e:
-            logger.warning("주문 취소 실패 %s: %s", symbol, e)
+        # 1) 남은 TP/SL 주문 취소 (일반 + 트리거 주문부)
+        self._cancel_all_orders_full(symbol)
         # 2) 거래소 실제 수량 조회 (더스트 방지)
         close_side = "sell" if direction == "long" else "buy"
         actual_qty = qty
@@ -729,13 +740,10 @@ class LiveBroker:
             raise  # 호출자에게 전파 (고아 포지션 방지)
 
     def cancel_all_orders(self, symbol: str) -> None:
-        """특정 심볼의 열린 주문 전체 취소 (긴급 청산 시 사용)."""
+        """특정 심볼의 열린 주문 전체 취소 — 일반 + 트리거 주문부 (긴급 청산·sync 정리 사용)."""
         if self.dry_run:
             return
-        try:
-            self.exchange.cancel_all_orders(symbol)
-        except Exception as e:
-            logger.warning("주문 취소 실패 %s: %s", symbol, e)
+        self._cancel_all_orders_full(symbol)
 
     def close_position(self, symbol: str, direction: str) -> None:
         """시장가 포지션 강제 청산."""

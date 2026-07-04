@@ -72,6 +72,10 @@ def main() -> None:
         except Exception as e:
             print(f"  주문취소 실패 {sym}: {e}")
         try:
+            ex.cancel_all_orders(sym, params={"trigger": True})  # Algo 주문부(STOP_MARKET)
+        except Exception as e:
+            print(f"  주문취소 실패(트리거) {sym}: {e}")
+        try:
             qty = ex.amount_to_precision(sym, abs(float(p["contracts"])))
             ex.create_order(sym, "market", close_side, qty, None, {"reduceOnly": True})
             closed.append(sym)
