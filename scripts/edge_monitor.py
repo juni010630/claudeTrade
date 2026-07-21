@@ -1,7 +1,7 @@
 """라이브 엣지부패 모니터 — 매일 1회 (systemd timer), 프로덕션 무수정.
 
 ① 신호 패리티: ANCHOR부터 현재까지 v21d 리플레이 vs 라이브 실체결(trades.csv +
-   state.json 보유 포지션) 진입 이벤트 대조. 불일치 1건 = WARN.
+   state.json 보유 포지션) 진입 이벤트 대조. 설명 불가능한 불일치 = WARN.
    (경로의존 때문에 윈도우 분할 금지 — 항상 ANCHOR부터 전체 리플레이)
 ② 체결 품질: 매칭된 진입의 라이브 vs 리플레이 가격 괴리(bps, +=불리).
    중앙값 > 15bps 또는 단건 > 50bps = WARN. (백테 가정 5bps)
@@ -12,7 +12,8 @@
 자동 행동 없음 — 경보만. 성과 기반 자동 감속은 tail-cut/스트릭 기각 교훈상 금지,
 파국 경로는 딥플로어(live_trade)가 담당.
 
-알림: WARN/ALERT 시 즉시, 월요일엔 무소식이어도 주간 요약. 실행 실패도 텔레그램.
+알림: 새 WARN/ALERT 또는 해소 후 재발 시 즉시, 월요일엔 주간 요약.
+동일한 과거 이상을 매일 재전송하지 않는다. 실행 실패는 항상 텔레그램.
 재배포(config 변경) 시: ANCHOR/CONFIG/BASELINE 갱신 + 베이스라인 재생성 필수.
 (ANCHOR_CAPITAL은 라이브 잔고 자동조회로 대체 — 신호/슬리피지 패리티엔 무관해 정밀값 불요.)
 
@@ -66,6 +67,7 @@ CACHE_DIR = Path("data/edge_cache")
 EQUITY_LOG = Path("data/edge_equity_log.csv")
 TRADES_CSV = Path("trades.csv")
 STATE_JSON = Path("data/state.json")
+ALERT_STATE_JSON = Path("data/edge_alert_state.json")
 
 # ── 사전선언 임계 (사후 완화 금지) ────────────────────────────────
 SLIP_MED_WARN_BPS = 15.0   # 매칭 진입 슬리피지 중앙값
@@ -472,6 +474,52 @@ def rolling_percentiles() -> list[str]:
     return out
 
 
+# ── ⑥ 경보 상태 전이/중복 억제 ───────────────────────────────────
+def should_notify_alert_transition(
+    active_alerts: set[str],
+    *,
+    is_monday: bool = False,
+    force: bool = False,
+    state_path: Path = ALERT_STATE_JSON,
+) -> bool:
+    """현재 활성 경보 집합을 저장하고 새 경보가 생겼을 때만 즉시 알린다.
+
+    edge replay는 ANCHOR부터 전구간을 매일 다시 계산하므로, 과거 불일치 한 건도
+    해소될 때까지 매일 WARN으로 재검출된다. 경보의 존재가 아니라 상태 전이
+    (신규/해소 후 재발)를 알림 조건으로 삼아 경보 피로를 막는다.
+
+    상태 파일이 처음 생기는 배포 실행은 현재 경보를 기준선으로만 등록한다.
+    실제 실행 예외는 이 함수 밖의 except 경로에서 언제나 즉시 전송된다.
+    """
+    state_exists = state_path.exists()
+    previous: set[str] = set()
+    if state_exists:
+        try:
+            raw = json.loads(state_path.read_text())
+            previous = set(raw.get("active_alerts", []))
+        except (OSError, ValueError, TypeError) as e:
+            # 손상/읽기 실패는 신규 경보를 침묵시키지 않도록 빈 상태로 간주한다.
+            logger.warning("edge 경보 상태 읽기 실패 — 신규 상태로 복구: %s", e)
+
+    new_alerts = active_alerts - previous
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
+    payload = {
+        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        "active_alerts": sorted(active_alerts),
+    }
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    tmp_path.replace(state_path)
+
+    if force or is_monday:
+        return True
+    if not state_exists:
+        logger.info("edge 경보 상태 기준선 생성: 활성 %d건 (초기 중복알림 억제)",
+                    len(active_alerts))
+        return False
+    return bool(new_alerts)
+
+
 # ── 메인 ──────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -496,6 +544,7 @@ def main() -> None:
         append_equity_log(usdt)
 
         lines, severity = [], "OK"
+        active_alerts: set[str] = set()
         days = max(0, (pd.Timestamp.now(tz="UTC") - ANCHOR).days)
         lines.append(f"기간 {ANCHOR.date()}~ ({days}일) | 라이브 {len(live)}건 / 리플레이 {len(rep)}건")
 
@@ -514,6 +563,11 @@ def main() -> None:
                 else:
                     reason, benign = classify_miss(rr, history, corr_cache, gcfg)
                 unexplained += 0 if benign else 1
+                if not benign:
+                    active_alerts.add(
+                        f"parity:{rr['symbol']}:{rr['direction']}:{rr['strategy']}:"
+                        f"{rr['entry_time'].isoformat()}"
+                    )
                 ev_lines.append(f"① 라이브 미체결: {rr['symbol']} {rr['direction']} "
                                 f"{rr['strategy']} @{rr['entry_time']:%m-%d %H:%M} → {reason}")
             for lr in live_only:
@@ -543,6 +597,10 @@ def main() -> None:
                     or abs(mx) > SLIP_MAX_WARN_BPS):
                 severity = "WARN" if severity == "OK" else severity
                 note = " ⚠️"
+                if len(slips) >= 5 and abs(med) > SLIP_MED_WARN_BPS:
+                    active_alerts.add("slippage:median")
+                if abs(mx) > SLIP_MAX_WARN_BPS:
+                    active_alerts.add("slippage:max")
             lines.append(f"② 진입 슬리피지(n={len(slips)}): 중앙값 {med:+.1f}bps / "
                          f"최대 {mx:+.1f}bps (가정 5bps){note}")
 
@@ -550,13 +608,19 @@ def main() -> None:
         roll = rolling_percentiles()
         if any("ALERT" in s for s in roll):
             severity = "ALERT"
+            for s in roll:
+                if "ALERT" in s:
+                    active_alerts.add(f"edge_decay:{s.split()[1]}")
         lines.extend(roll)
 
         head = {"OK": "🩺", "WARN": "⚠️", "ALERT": "🚨"}[severity]
         body = f"{head} <b>엣지 모니터 [{severity}]</b>\n" + "\n".join(lines)
         print(body)
         is_monday = pd.Timestamp.now(tz="UTC").weekday() == 0
-        if notifier.enabled and (severity != "OK" or is_monday or args.force_notify):
+        should_notify = should_notify_alert_transition(
+            active_alerts, is_monday=is_monday, force=args.force_notify,
+        )
+        if notifier.enabled and should_notify:
             notifier.notify_info(body)
             time.sleep(1)
     except Exception as e:
