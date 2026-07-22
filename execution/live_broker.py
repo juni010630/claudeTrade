@@ -305,6 +305,22 @@ class LiveBroker:
         price     = order.price
         size_usd  = order.size_usd
 
+        if price <= 0 or size_usd <= 0 or order.tp_price <= 0 or order.sl_price <= 0:
+            raise ValueError(
+                f"유효하지 않은 진입/보호 가격: price={price}, "
+                f"size={size_usd}, tp={order.tp_price}, sl={order.sl_price}"
+            )
+        valid_geometry = (
+            order.sl_price < price < order.tp_price
+            if order.direction == "long"
+            else order.tp_price < price < order.sl_price
+        )
+        if not valid_geometry:
+            raise ValueError(
+                f"TP/SL 방향 불일치: {order.symbol} {order.direction} "
+                f"tp={order.tp_price}, entry={price}, sl={order.sl_price}"
+            )
+
         self._ensure_leverage(symbol, order.leverage)
 
         # 수량 계산 (USD → 코인 수량)

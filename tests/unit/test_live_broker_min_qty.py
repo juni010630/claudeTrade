@@ -58,3 +58,11 @@ def test_below_min_cost_is_rejected():
     order = _order(size_usd=10.0, price=100.0)
     with pytest.raises(ValueError, match="주문 금액"):
         broker.submit(order)
+
+
+def test_invalid_protection_price_is_rejected_before_exchange_call():
+    broker = LiveBroker(exchange=_FakeExchange(min_qty=0.001), dry_run=False)
+    order = _order(size_usd=100.0, price=100.0)
+    order.tp_price = -1.0
+    with pytest.raises(ValueError, match="유효하지 않은"):
+        broker.submit(order)
