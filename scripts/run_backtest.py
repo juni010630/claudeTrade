@@ -41,9 +41,43 @@ from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
 import pandas as pd
 
 
+def validate_params(p: dict) -> None:
+    """운영에 필요한 최소 config 불변식을 검증한다.
+
+    알 수 없는 키를 모두 금지하지는 않는다(연구 config 하위호환). 대신 누락/오타가
+    조용히 다른 전략이나 기본값으로 실행될 수 있는 핵심 항목만 fail-closed 한다.
+    """
+    if not isinstance(p, dict):
+        raise ValueError("config 최상위는 mapping이어야 합니다")
+    symbols = p.get("symbols")
+    timeframes = p.get("timeframes")
+    if not isinstance(symbols, list) or not symbols:
+        raise ValueError("config.symbols는 비어 있지 않은 list여야 합니다")
+    if not isinstance(timeframes, list) or not timeframes:
+        raise ValueError("config.timeframes는 비어 있지 않은 list여야 합니다")
+    primary_tf = p.get("primary_timeframe", "1h")
+    if primary_tf not in timeframes:
+        raise ValueError(
+            f"primary_timeframe={primary_tf!r}가 timeframes에 없습니다: {timeframes}"
+        )
+    strategies = p.get("strategies")
+    if not isinstance(strategies, dict) or not strategies:
+        raise ValueError("config.strategies는 비어 있지 않은 mapping이어야 합니다")
+    risk = p.get("risk", {})
+    max_notional = risk.get("max_notional_usd")
+    if max_notional is not None and float(max_notional) <= 0:
+        raise ValueError("risk.max_notional_usd는 양수여야 합니다")
+    fractions = p.get("strategy_capital_fraction", {})
+    if any(float(v) <= 0 for v in fractions.values()):
+        raise ValueError("strategy_capital_fraction 값은 모두 양수여야 합니다")
+
+
 def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None,
-                  isolated_margin: bool = False, **engine_kwargs) -> BacktestEngine:
+                  isolated_margin: bool = False, broker_override=None,
+                  notifier=None, trade_log_path: str | None = None,
+                  **engine_kwargs) -> BacktestEngine:
     """params.yaml 딕셔너리로 BacktestEngine을 생성합니다."""
+    validate_params(p)
     symbols = p["symbols"]
     r  = p.get("risk", {})
     e  = p.get("execution", {})
@@ -66,6 +100,12 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
     # config도 미사용). live_trade.build_engine과 반드시 대칭(백테=라이브 절대규칙). 양쪽 동일 패턴.
     if HammerVolStrategy is not None:
         strategy_map["hammer_vol"] = HammerVolStrategy
+    unknown_enabled = sorted(
+        key for key, cfg in p.get("strategies", {}).items()
+        if key not in strategy_map and isinstance(cfg, dict) and cfg.get("enabled", True)
+    )
+    if unknown_enabled:
+        raise ValueError(f"알 수 없는 활성 전략 키: {', '.join(unknown_enabled)}")
     strategies = []
     for key, cls in strategy_map.items():
         cfg = p.get("strategies", {}).get(key)
@@ -151,17 +191,20 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
             lag_days=dvp.get("lag_days", 1),
         )
 
-    commission_model = CommissionModel(
-        maker_rate=e.get("commission_maker", 0.0002),
-        taker_rate=e.get("commission_taker", 0.0005),
-    )
-    slippage_model = SlippageModel(
-        default_bps=e.get("default_slippage_bps", 5.0),
-    )
-    broker = BacktestBroker(
-        commission_model=commission_model,
-        slippage_model=slippage_model,
-    )
+    if broker_override is None:
+        commission_model = CommissionModel(
+            maker_rate=e.get("commission_maker", 0.0002),
+            taker_rate=e.get("commission_taker", 0.0005),
+        )
+        slippage_model = SlippageModel(
+            default_bps=e.get("default_slippage_bps", 5.0),
+        )
+        broker = BacktestBroker(
+            commission_model=commission_model,
+            slippage_model=slippage_model,
+        )
+    else:
+        broker = broker_override
 
     return BacktestEngine(
         initial_capital=initial_capital,
@@ -256,6 +299,8 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
         tp_round_mode=engine_kwargs.pop("tp_round_mode", p.get("tp_round_snap", {}).get("mode", "big")),
         tp_round_max_pullin=engine_kwargs.pop("tp_round_max_pullin", p.get("tp_round_snap", {}).get("max_pullin", 0.33)),
         tp_round_offset=engine_kwargs.pop("tp_round_offset", p.get("tp_round_snap", {}).get("offset", 0.0)),
+        notifier=notifier,
+        trade_log_path=trade_log_path,
         pyramid_trigger_r=(p.get("pyramid", {}).get("trigger_r")
                            if p.get("pyramid", {}).get("enabled") else None),
         pyramid_add_fraction=p.get("pyramid", {}).get("add_fraction", 0.5),
@@ -286,7 +331,7 @@ def build_engine(p: dict, initial_capital: float, abort_mdd: float | None = None
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", default="config/final_v13_eth.yaml", help="파라미터 파일 경로")
+    parser.add_argument("--params", default="config/final_v21d_eexit.yaml", help="파라미터 파일 경로")
     parser.add_argument("--start", default=None, help="백테스트 시작일 (YYYY-MM-DD)")
     parser.add_argument("--end", default=None, help="백테스트 종료일 (YYYY-MM-DD)")
     parser.add_argument("--capital", type=float, default=None, help="초기 자본")

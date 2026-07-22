@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
 import os
@@ -29,29 +30,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from data.live_feed import LiveFeed
 from engine.backtest import BacktestEngine
 from portfolio import state_store
-from execution.commission import CommissionModel
-from execution.funding import FundingRateSimulator
 from execution.live_broker import LiveBroker
 from execution.notifier import TelegramNotifier
 from execution.sl_poller import SLPoller
-from execution.slippage import SlippageModel
 from metrics.report import MetricsReport
-from regime.detector import RegimeDetector
-from risk.circuit_breaker import CircuitBreaker
-from risk.correlation import CorrelationFilter
-from risk.guards import RiskGuards
-from risk.margin_tiers import MarginTierTable
-from risk.position_sizer import PositionSizer
-from signals.scorer import ConfluenceScorer
-from strategies.ema_cross import EMACrossStrategy
-from strategies.ema_slow_daily import EmaSlowDailyStrategy
-try:
-    from strategies.hammer_vol import HammerVolStrategy  # ⚠️ 기각된 연구 전략(2026-06-19, HAMMER_RESULTS.md) — 미커밋·off-default, 라이브 미사용. 파일 없으면 graceful skip
-except ImportError:
-    HammerVolStrategy = None
-from strategies.mean_reversion import MeanReversionStrategy
-from strategies.momentum_breakout import MomentumBreakoutStrategy
-from strategies.multi_tf_breakout import MultiTFBreakoutStrategy
 
 # ── 로깅 ──────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -65,12 +47,13 @@ logging.basicConfig(
 logger = logging.getLogger("live_trade")
 
 # ── 기본 파라미터 파일 ────────────────────────────────────────────
-DEFAULT_PARAMS = "config/final_v17.yaml"  # 채택 2026-06-09: 무차단+슬리브 50:50
+DEFAULT_PARAMS = "config/final_v21d_eexit.yaml"
 
 # ── 딥플로어 정지 플래그 ──────────────────────────────────────────
 # 발동 시 생성 → systemd Restart=always가 재기동해도 이 파일이 있으면 거래 재개 안 함.
 # 해제(수동): rm data/deep_floor_halt.json && sudo systemctl restart trade-bot
 DEEP_FLOOR_HALT = Path("data/deep_floor_halt.json")
+DRY_STATE_PATH = Path("data/state_dryrun.json")
 
 
 # ── ccxt Exchange 생성 ────────────────────────────────────────────
@@ -104,212 +87,90 @@ def build_exchange(demo: bool) -> ccxt.Exchange:
 
 
 # ── 엔진 빌드 ─────────────────────────────────────────────────────
-def build_engine(p: dict, broker: LiveBroker, notifier: TelegramNotifier | None = None, initial_capital: float | None = None) -> BacktestEngine:
-    symbols    = p["symbols"]
-    r          = p.get("risk", {})
-    e          = p.get("execution", {})
-    rg         = p.get("regime", {})
-    sc         = p.get("scorer", {})
+def build_engine(
+    p: dict,
+    broker: LiveBroker,
+    notifier: TelegramNotifier | None = None,
+    initial_capital: float | None = None,
+) -> BacktestEngine:
+    """백테스트와 동일한 단일 빌더를 사용해 설정 배선 차이를 원천 차단한다."""
+    from scripts.run_backtest import build_engine as build_common_engine
 
-    # ⚠️ run_backtest.build_engine의 strategy_map과 키 집합이 정확히 일치해야 함
-    # (백테=라이브 절대규칙). 누락 시 백테는 거래·라이브는 조용히 스킵 → 불일치.
-    strategy_map = {
-        "ema_cross":          EMACrossStrategy,
-        "ema_cross_slow":     EMACrossStrategy,   # 다중 속도 변형 (strategy_name으로 구분)
-        "multi_tf_breakout":  MultiTFBreakoutStrategy,
-        "mean_reversion":     MeanReversionStrategy,
-        "macross_d":          EmaSlowDailyStrategy,  # 1d 슬로우 크로스 (NEWEDGE_GREEDY_RESULTS.md)
-        "momentum_breakout":  MomentumBreakoutStrategy,  # 15m 모멘텀 (Scalp 검증 포팅)
-    }
-    # 망치+거래량 — ⚠️ 기각됨(2026-06-19, HAMMER_RESULTS.md): 엔진+비용+OOS 비생존. off-default 스캐폴딩
-    # (어떤 라이브 config도 미사용). run_backtest.build_engine과 대칭 조건부 등록(파일 미커밋 → graceful skip).
-    if HammerVolStrategy is not None:
-        strategy_map["hammer_vol"] = HammerVolStrategy
-    strategies = []
-    for key, cls in strategy_map.items():
-        cfg = p.get("strategies", {}).get(key)
-        if cfg is None:
-            continue  # config 미정의 전략은 비활성 (run_backtest와 동일 규칙)
-        if not cfg.get("enabled", True):
-            continue
-        cfg.setdefault("symbols", symbols)  # config에 전략별 symbols 있으면 존중(run_backtest와 동일)
-        strategies.append(cls(cfg))
-
-    cap = initial_capital if initial_capital is not None else p.get("backtest", {}).get("initial_capital", 10_000)
-
-    # FNG 레짐 틸트: 일별 시변 capital_fraction 스케줄 (run_backtest와 동일 빌더·동일 CSV → 패리티)
-    _cap_frac_sched = None
-    _rt = p.get("regime_tilt", {})
-    if _rt.get("enabled"):
-        from regime.fng_tilt import build_fng_tilt_schedule
-        _cap_frac_sched = build_fng_tilt_schedule(
-            base_fractions=p.get("strategy_capital_fraction") or {},
-            fng_csv=_rt.get("fng_csv", "data/regime/fng_daily.csv"),
-            delta=_rt.get("delta", 0.10),
-            direction=_rt.get("direction", 1),
-            momentum_strategies=_rt.get("momentum_strategies", []),
-            meanrev_strategies=_rt.get("meanrev_strategies", []),
-            lag_days=_rt.get("lag_days", 1),
-        )
-
-    # DVOL 인버스 변동성타게팅: 글로벌 사이즈 배수 (run_backtest와 동일 빌더·데이터 → 패리티)
-    _size_scale_sched = None
-    _dv = p.get("dvol_scale", {})
-    if _dv.get("enabled"):
-        from regime.dvol_scale import build_dvol_schedule
-        _size_scale_sched = build_dvol_schedule(
-            dvol_path=_dv.get("dvol_path", "data/regime/dvol_btc_full.parquet"),
-            target=_dv.get("target", 45.0), clip_lo=_dv.get("clip_lo", 0.3),
-            clip_hi=_dv.get("clip_hi", 2.0), lag_days=_dv.get("lag_days", 1),
-        )
-
-    # DVOL 책별 차등 (per-book) → capital_fraction_schedule (run_backtest와 동일 빌더 → 패리티)
-    _dvp = p.get("dvol_perbook", {})
-    if _dvp.get("enabled"):
-        from regime.dvol_scale import build_dvol_perbook_schedule
-        _cap_frac_sched = build_dvol_perbook_schedule(
-            base_fractions=p.get("strategy_capital_fraction") or {},
-            dvol_path=_dvp.get("dvol_path", "data/regime/dvol_btc_full.parquet"),
-            targets=_dvp.get("targets", {}), clip_lo=_dvp.get("clip_lo", 0.3),
-            clip_hi=_dvp.get("clip_hi", 2.0), lag_days=_dvp.get("lag_days", 1),
-        )
-
-    # 피라미딩 라이브: 진입 시 STOP_MARKET 증액 주문 등록 → 체결 시 엔진이
-    # 봉 high/low 트리거로 tracker 동기화 + TP/SL 총수량 재등록 (engine/backtest.py)
-    # ⚠️ testnet은 STOP_MARKET -4120 차단 → 증액 주문 등록 실패 로그 발생 (포지션은 정상)
-
-    # ML 소프트 스코링 (선택적) — run_backtest.py와 동일 로직
-    _ml_filter_live = None
-    _ml_cfg_live = sc.get("ml_soft_scoring", {})
-    _ml_mode_live = "bonus"
-    _ml_cut_live = 0.45
-    if _ml_cfg_live.get("enabled", False):
-        try:
-            from strategies.ml_filter import MLModels, MLSignalFilter
-            _models_live = MLModels.load(_ml_cfg_live.get("model_path", "models/ml_filter.pkl"))
-            _ml_mode_live = _ml_cfg_live.get("mode", "bonus")
-            _ml_cut_live = _ml_cfg_live.get("cut_threshold", 0.45)
-            _ml_filter_live = MLSignalFilter(
-                models=_models_live,
-                clf_threshold=_ml_cut_live if _ml_mode_live == "hardcut" else 0.0,
-            )
-        except Exception as _e:
-            import logging as _lg
-            _lg.getLogger(__name__).warning("ML 모델 로드 실패: %s — ML 비활성", _e)
-
-    return BacktestEngine(
-        initial_capital=cap,
-        strategies=strategies,
-        regime_detector=RegimeDetector(
-            primary_symbol=symbols[0],
-            adx_period=rg.get("adx_period", 14),
-            adx_trending_threshold=rg.get("adx_trending_threshold", 25.0),
-            adx_ranging_threshold=rg.get("adx_ranging_threshold", 20.0),
-            bb_period=rg.get("bb_period", 20),
-            bb_std=rg.get("bb_std", 2.0),
-            bb_width_lookback=rg.get("bb_width_lookback", 50),
-            bb_width_squeeze_pct=rg.get("bb_width_squeeze_pct", 0.2),
-            primary_tf=rg.get("primary_tf", "1h"),
-        ),
-        confluence_scorer=ConfluenceScorer(
-            volume_ratio_threshold=sc.get("volume_ratio_threshold", 1.5),
-            rsi_long_max=sc.get("rsi_long_max", 65.0),
-            rsi_short_min=sc.get("rsi_short_min", 35.0),
-            funding_long_max=sc.get("funding_long_max", 0.0003),
-            funding_short_min=sc.get("funding_short_min", -0.0003),
-            daily_ema_period=sc.get("daily_ema_period", 200),
-            tier_sss_min_score=sc.get("tier_sss_min_score", 99),
-            tier_ss_min_score=sc.get("tier_ss_min_score", 7),
-            tier_s_min_score=sc.get("tier_s_min_score", 5),
-            tier_a_min_score=sc.get("tier_a_min_score", 3),
-            tier_b_min_score=sc.get("tier_b_min_score", 2),
-            tier_c_min_score=sc.get("tier_c_min_score", 1),
-            regime_strong_adx=sc.get("regime_strong_adx"),
-            regime_high_adx_cutoff=sc.get("regime_high_adx_cutoff"),
-            ml_filter=_ml_filter_live,
-            ml_bonus_threshold_1=_ml_cfg_live.get("bonus_threshold_1", 0.6),
-            ml_bonus_threshold_2=_ml_cfg_live.get("bonus_threshold_2", 0.75),
-            ml_mode=_ml_mode_live,
-            ml_cut_threshold=_ml_cut_live,
-            rsi_neutral_penalty=tuple(sc["rsi_neutral_penalty"]) if sc.get("rsi_neutral_penalty") else None,
-        ),
-        risk_guards=RiskGuards(
-            max_positions=r.get("max_positions", 4),
-            max_same_direction=r.get("max_same_direction", 3),
-            daily_pause_threshold=r.get("daily_drawdown_pause", -0.05),
-            daily_stop_threshold=r.get("daily_drawdown_stop", -0.08),
-            tp_cooldown_hours=r.get("tp_cooldown_hours", 0.0),
-        ),
-        circuit_breaker=CircuitBreaker(
-            strategy_pause_losses=r.get("circuit_breaker_pause_losses", 5),
-            global_stop_losses=r.get("circuit_breaker_stop_losses", 10),
-            pause_duration_hours=r.get("circuit_breaker_pause_hours", 48),
-        ),
-        correlation_filter=CorrelationFilter(
-            block_threshold=r.get("correlation_block_threshold", 0.9),
-            lookback=r.get("correlation_lookback", 100),
-        ),
-        position_sizer=PositionSizer(
-            risk_per_trade=r.get("risk_per_trade", 0.01),
-            tier_config=p.get("leverage_tiers"),
-            max_notional_usd=r.get("max_notional_usd"),
-            max_notional_equity_mult=r.get("max_notional_equity_mult", 3.0),
-        ),
-        strategy_leverage_tiers=p.get("strategy_leverage_tiers"),
-        strategy_capital_fraction=p.get("strategy_capital_fraction"),
-        capital_fraction_schedule=_cap_frac_sched,
-        size_scale_schedule=_size_scale_sched,
-        sizing_pools=p.get("sizing_pools"),
-        broker=broker,
-        funding_simulator=FundingRateSimulator(
-            interval_hours=e.get("funding_interval_hours", 8)
-        ),
-        price_tf=p.get("primary_timeframe", "1h"),  # 1d 슬리브용 — 기본 1h(v16 무영향)
-        max_hold_hours=p.get("engine", {}).get("max_hold_hours"),
-        gap_sl_pessimistic=p.get("engine", {}).get("gap_sl_pessimistic", False),
-        margin_tier_table=MarginTierTable() if p.get("engine", {}).get("use_margin_tiers") else None,
-        breakeven_trigger_r=p.get("engine", {}).get("breakeven_trigger_r"),
-        trailing_r_mult=p.get("engine", {}).get("trailing_r_mult"),
-        strategy_min_score=p.get("strategy_min_score"),
-        strategy_fixed_tier=p.get("strategy_fixed_tier"),
-        strategy_max_hold_hours=p.get("strategy_max_hold_hours"),
-        strategy_guard_isolated=p.get("strategy_guard_isolated"),
-        strategy_block_hours=p.get("strategy_block_hours"),
-        strategy_block_symbols=p.get("strategy_block_symbols"),
-        tier_block_symbols=p.get("tier_block_symbols"),
-        symbol_block_directions=p.get("symbol_block_directions"),
-        strategy_block_tiers=p.get("strategy_block_tiers"),
-        block_weekdays=p.get("block_weekdays"),
-        direction_size_mult=p.get("direction_size_mult"),
-        strategy_size_penalty=p.get("strategy_size_penalty"),
-        strategy_size_bonus=p.get("strategy_size_bonus"),
-        strategy_size_bonus_mult=p.get("strategy_size_bonus_mult", 1.5),
-        pyramid_trigger_r=(p.get("pyramid", {}).get("trigger_r")
-                           if p.get("pyramid", {}).get("enabled") else None),
-        pyramid_add_fraction=p.get("pyramid", {}).get("add_fraction", 0.5),
-        pyramid_max_adds=p.get("pyramid", {}).get("max_adds", 1),
-        pyramid_strategies=p.get("pyramid", {}).get("strategies"),
-        pyramid_min_score=p.get("pyramid", {}).get("min_score"),
-        rsi_momentum_gate=p.get("rsi_momentum", {}).get("gate"),
-        rsi_momentum_weight=p.get("rsi_momentum", {}).get("weight"),
-        rsi_momentum_period=p.get("rsi_momentum", {}).get("period", 14),
-        vol_target_ann=p.get("vol_target", {}).get("target_ann"),
-        vol_scale_min=p.get("vol_target", {}).get("scale_min", 0.3),
-        vol_scale_max=p.get("vol_target", {}).get("scale_max", 2.0),
-        vol_lookback=p.get("vol_target", {}).get("lookback", 30),
-        btc_mom_gate=p.get("btc_regime", {}).get("mom_gate", False),
-        btc_mom_opposite_weight=p.get("btc_regime", {}).get("mom_opposite_weight"),
-        btc_mom_lookback=p.get("btc_regime", {}).get("mom_lookback", 20),
-        equity_curve_trading=p.get("equity_curve_trading", 0),
-        adx_scaling=p.get("adx_scaling", False),
-        abort_mdd_threshold=r.get("deep_floor_dd"),  # 딥플로어 — 루프에서 _aborted 감지 시 전량청산+정지
-        tp_round_snap=p.get("tp_round_snap", {}).get("enabled", False),
-        tp_round_mode=p.get("tp_round_snap", {}).get("mode", "big"),
-        tp_round_max_pullin=p.get("tp_round_snap", {}).get("max_pullin", 0.33),
-        tp_round_offset=p.get("tp_round_snap", {}).get("offset", 0.0),
-        notifier=notifier,
-        trade_log_path="trades.csv",
+    capital = (
+        initial_capital
+        if initial_capital is not None
+        else p.get("backtest", {}).get("initial_capital", 10_000)
     )
+    return build_common_engine(
+        p,
+        initial_capital=capital,
+        broker_override=broker,
+        notifier=notifier,
+        trade_log_path="trades_dryrun.csv" if broker.dry_run else "trades.csv",
+    )
+
+
+def acquire_instance_lock(dry_run: bool):
+    """동일 모드 프로세스가 둘 이상 주문하지 못하게 비차단 잠금을 유지한다."""
+    lock_path = Path("data/live_trade.dryrun.lock" if dry_run else "data/live_trade.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as e:
+        handle.close()
+        raise RuntimeError(f"이미 실행 중인 동일 모드 봇이 있습니다: {lock_path}") from e
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    return handle
+
+
+def fetch_live_positions_or_raise(
+    broker: LiveBroker, retries: int = 4, wait_sec: float = 5.0
+) -> dict[str, dict]:
+    """실포지션 조회 실패를 flat으로 오판하지 않는 기동 가드."""
+    for attempt in range(retries):
+        positions = broker.fetch_open_positions()
+        if positions is not None:
+            return positions
+        if attempt < retries - 1:
+            time.sleep(wait_sec)
+    raise RuntimeError("거래소 포지션 조회 반복 실패")
+
+
+def reconcile_saved_positions(saved, live_positions: dict[str, dict]) -> dict:
+    """저장 state와 거래소의 심볼·방향·수량·평단가를 교차 검증한다."""
+    saved_positions = saved.positions if saved is not None else {}
+    orphans = set(live_positions) - set(saved_positions)
+    if orphans:
+        raise RuntimeError(f"저장 state에 없는 거래소 포지션: {', '.join(sorted(orphans))}")
+
+    restored = {}
+    for symbol, pos in saved_positions.items():
+        actual = live_positions.get(symbol)
+        if actual is None:
+            logger.warning("state 복원 skip: %s (거래소에 포지션 없음)", symbol)
+            continue
+        expected_qty = float(pos.size_usd) / float(pos.entry_price)
+        actual_qty = float(actual["contracts"])
+        actual_entry = float(actual["entry_price"])
+        qty_error = abs(actual_qty - expected_qty) / max(expected_qty, 1e-12)
+        entry_error = abs(actual_entry - float(pos.entry_price)) / max(float(pos.entry_price), 1e-12)
+        mismatches = []
+        if actual["direction"] != pos.direction:
+            mismatches.append(f"방향 state={pos.direction} exchange={actual['direction']}")
+        if qty_error > 0.005:
+            mismatches.append(
+                f"수량 state={expected_qty:.12g} exchange={actual_qty:.12g} ({qty_error:.2%})"
+            )
+        if actual_entry <= 0 or entry_error > 0.005:
+            mismatches.append(
+                f"평단 state={pos.entry_price:.12g} exchange={actual_entry:.12g} ({entry_error:.2%})"
+            )
+        if mismatches:
+            raise RuntimeError(f"{symbol} 포지션 불일치: " + "; ".join(mismatches))
+        restored[symbol] = pos
+    return restored
 
 
 # ── 메인 ──────────────────────────────────────────────────────────
@@ -339,9 +200,7 @@ def main() -> None:
     # 파라미터 로드
     params_path = Path(args.params)
     if not params_path.exists():
-        # 최적 파라미터가 아직 없으면 기본 v2 사용
-        logger.warning("%s 없음 → config/final_v13_eth.yaml 사용", args.params)
-        params_path = Path("config/final_v13_eth.yaml")
+        parser.error(f"파라미터 파일이 없습니다: {params_path}")
 
     with open(params_path) as f:
         params = yaml.safe_load(f)
@@ -349,6 +208,8 @@ def main() -> None:
 
     demo    = not args.no_demo
     dry_run = args.dry_run
+    instance_lock = acquire_instance_lock(dry_run)
+    runtime_state_path = DRY_STATE_PATH if dry_run else state_store.DEFAULT_PATH
 
     # Telegram notifier
     notifier = TelegramNotifier.from_env()
@@ -416,94 +277,77 @@ def main() -> None:
                     notifier.notify_info(msg)
                 except Exception:
                     pass
+            if not dry_run:
+                raise RuntimeError(msg)
         else:
             logger.info("시계오차 점검 OK (%.1fs)", _skew / 1000)
     except Exception as e:
-        logger.warning("시계오차 점검 실패(무시): %s", e)
+        if not dry_run:
+            raise RuntimeError(f"시계오차 점검 실패: {e}") from e
+        logger.warning("[DRY] 시계오차 점검 실패: %s", e)
 
     # 엔진 생성 — 실제 잔고를 초기 자본으로 주입 (백테스트 값 무시)
     engine = build_engine(params, broker, notifier=notifier, initial_capital=usdt)
     broker.equity_provider = lambda: engine.tracker.snapshot().equity
 
-    # state 복원 (이전 크래시 시 포지션/equity 유지)
-    saved = state_store.load()
-    if saved is not None and saved.positions:
-        # 거래소에 실제로 열린 포지션과 교차 검증. 조회 실패(None)면 진행 금지 —
-        # "포지션 0"으로 오판해 신규 시작하면 실포지션이 봇 인지 밖에서 표류한다.
-        # 종료 후 systemd 재시작(30s)이 자연 재시도.
-        exchange_syms = broker.fetch_open_symbols()
-        if exchange_syms is None:
-            for _retry in range(3):
-                time.sleep(5)
-                exchange_syms = broker.fetch_open_symbols()
-                if exchange_syms is not None:
-                    break
-        if exchange_syms is None:
-            logger.critical("거래소 포지션 조회 반복 실패 — 복원 불가, 종료(재시작 대기)")
+    # state 복원. 실계정은 저장 포지션과 거래소의 방향·수량·평단까지 일치해야 시작한다.
+    saved = None if dry_run else state_store.load(runtime_state_path)
+    if dry_run:
+        logger.info("DRY-RUN: 운영 state를 읽지 않고 별도 상태 파일을 사용")
+    else:
+        try:
+            live_positions = fetch_live_positions_or_raise(broker)
+            restored_positions = reconcile_saved_positions(saved, live_positions)
+        except RuntimeError as e:
+            logger.critical("기동 포지션 검증 실패: %s", e)
             if notifier and notifier.enabled:
                 try:
                     notifier.notify_info(
-                        "🚨 <b>기동 실패 — 포지션 조회 불가</b>\n"
-                        "저장된 포지션이 있으나 거래소 조회가 계속 실패. "
-                        "복원 없이 진행하면 실포지션 미관리 위험 → 재시작 대기"
+                        f"🚨 <b>기동 중단 — 포지션 검증 실패</b>\n{str(e)[:300]}\n"
+                        "저장 state와 거래소를 확인한 뒤 재시작하세요."
                     )
                 except Exception:
                     pass
-            raise SystemExit(1)
-        restored = 0
-        skipped_unreal = 0.0
-        for sym, pos in list(saved.positions.items()):
-            if sym in exchange_syms:
-                engine.tracker.state.positions[sym] = pos
-                restored += 1
-            else:
-                logger.warning("state 복원 skip: %s (거래소에 포지션 없음)", sym)
-                skipped_unreal += pos.unrealized_pnl
-        if restored:
-            # cash = total_balance - unrealized_pnl (이중 계산 방지)
-            # 거래소 실시간 unrealized PnL 조회 (stale state 방지)
+            raise SystemExit(1) from e
+
+        if restored_positions:
+            for symbol, pos in restored_positions.items():
+                engine.tracker.state.positions[symbol] = pos
             if usdt is not None and usdt > 0:
-                live_unrealized = 0.0
-                try:
-                    for pos_data in exchange.fetch_positions():
-                        if float(pos_data.get("contracts") or 0) != 0:
-                            live_unrealized += float(pos_data.get("unrealizedPnl") or 0)
-                except Exception:
-                    live_unrealized = sum(
-                        p.unrealized_pnl for p in engine.tracker.state.positions.values()
-                    )
+                live_unrealized = sum(
+                    float(live_positions[symbol]["unrealized_pnl"])
+                    for symbol in restored_positions
+                )
                 engine.tracker.state.cash = usdt - live_unrealized
             else:
                 engine.tracker.state.cash = saved.cash
             engine.tracker.state.equity = usdt if usdt else saved.equity
             engine.tracker.state.daily_start_equity = saved.daily_start_equity
-            # 같은 날 재시작일 때만 reset_daily() 건너뜀 — 자정을 넘겨 복구된 경우
-            # _last_day를 지금으로 찍으면 그날 리셋이 통째로 스킵돼 daily_start_equity가
-            # 전일 값으로 남는다. 마지막 저장 시각(state.json mtime)이 오늘이 아니면
-            # None 유지 → 첫 봉에서 reset_daily 실행.
             try:
-                _saved_at = pd.Timestamp(
-                    state_store.DEFAULT_PATH.stat().st_mtime, unit="s", tz="UTC")
+                saved_at = pd.Timestamp(
+                    runtime_state_path.stat().st_mtime, unit="s", tz="UTC"
+                )
             except Exception:
-                _saved_at = None
-            if _saved_at is not None and _saved_at.date() == pd.Timestamp.now(tz="UTC").date():
+                saved_at = None
+            if saved_at is not None and saved_at.date() == pd.Timestamp.now(tz="UTC").date():
                 engine._last_day = pd.Timestamp.now(tz="UTC")
-            # cash가 실잔고로 재앵커링됨(실잔고엔 이미 정산 펀딩 반영) → 현재 펀딩 버킷을
-            # '정산됨'으로 표시해 첫 봉에서 같은 버킷 펀딩 중복부과 방지
             engine.funding_sim.sync_to(pd.Timestamp.now(tz="UTC"))
-            # 사이징 풀 복원 — 저장본 없으면 첫 봉에서 현재 equity 비례 재초기화
             if engine.tracker._pool_fractions:
                 engine.tracker.state.pool_cash = saved.pool_cash
-            logger.info("state 복원 완료: %d 포지션, cash=%.2f (거래소 잔고), daily_start=%.2f",
-                        restored, engine.tracker.state.cash, saved.daily_start_equity)
+            logger.info(
+                "state 복원 완료: %d 포지션, cash=%.2f, daily_start=%.2f",
+                len(restored_positions),
+                engine.tracker.state.cash,
+                saved.daily_start_equity,
+            )
+        elif saved is not None:
+            logger.info("거래소 실포지션 없음 — 저장 state의 stale 포지션은 복원하지 않음")
         else:
-            logger.info("복원할 포지션 없음 (거래소와 불일치) → 신규 시작")
-    else:
-        logger.info("저장된 state 없음 → 신규 시작")
+            logger.info("저장된 state와 거래소 실포지션 없음 — 신규 시작")
 
     # CB 연속손절/정지·TP 쿨다운 복원 (포지션 유무 무관 — flat이어도 STOP/PAUSE 유지).
     # systemd Restart=always 환경에서 재기동마다 손실 방어 가드가 0으로 리셋되는 것을 방지.
-    state_store.restore_runtime(engine)
+    state_store.restore_runtime(engine, path=runtime_state_path)
 
     # 딥플로어 해제 후 거래 재개: 여기 도달 = halt 파일 없음(위 357행 통과). restore_runtime이
     # peak를 max()로 복원하므로, 딥플로어(-55%) 발동 후 운영자가 halt 파일만 지우고 재시작하면
@@ -521,7 +365,7 @@ def main() -> None:
                 engine._peak_equity, _cur_eq, _dd * 100, engine._abort_mdd * 100,
             )
             engine._peak_equity = _cur_eq
-            state_store.save(engine.tracker.snapshot(), engine=engine)
+            state_store.save(engine.tracker.snapshot(), path=runtime_state_path, engine=engine)
             if notifier and notifier.enabled:
                 try:
                     notifier.notify_info(
@@ -720,7 +564,7 @@ def main() -> None:
                                     break
                                 time.sleep(2)
                         state = engine.tracker.snapshot()
-                    state_store.save(state, engine=engine)
+                    state_store.save(state, path=runtime_state_path, engine=engine)
                     if notifier and notifier.enabled:
                         notifier.notify_info(
                             f"⛔ <b>딥플로어 발동 — 전량 청산·거래 정지</b>\n"
@@ -741,7 +585,7 @@ def main() -> None:
 
                 # state 디스크 저장 (매 봉 — 크래시 복구용)
                 # engine 전달 → CB 연속손절/정지·TP 쿨다운도 함께 영속화
-                state_store.save(state, engine=engine)
+                state_store.save(state, path=runtime_state_path, engine=engine)
 
                 # 매 봉(매시간) 텔레그램 알림 — 항상 발송. 포지션 유무로 내용만 구분:
                 #   포지션 0 → "잘 돌아감", 보유 시 → 심볼/진입가/현재 PnL
@@ -869,7 +713,9 @@ def main() -> None:
         if sl_poller is not None:
             sl_poller.stop()
         # 종료 전 state 저장 (CB/쿨다운 포함)
-        state_store.save(engine.tracker.snapshot(), engine=engine)
+        state_store.save(
+            engine.tracker.snapshot(), path=runtime_state_path, engine=engine
+        )
         logger.info("종료 전 state 저장 완료")
         # 최종 성과 출력
         report = MetricsReport.from_run(engine.equity_curve, engine.ledger)

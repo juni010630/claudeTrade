@@ -84,7 +84,10 @@ class LiveBroker:
             self._leverage_cache[symbol] = leverage
             logger.info("레버리지 설정: %s x%d", symbol, leverage)
         except Exception as e:
-            logger.warning("레버리지 설정 실패 %s x%d: %s", symbol, leverage, e)
+            if self.dry_run:
+                logger.warning("[DRY] 레버리지 설정 생략 %s x%d: %s", symbol, leverage, e)
+                return
+            raise RuntimeError(f"레버리지 설정 실패 {symbol} x{leverage}: {e}") from e
 
     # ── TP/SL 주문 ──────────────────────────────────────────────────
     #
@@ -93,13 +96,20 @@ class LiveBroker:
     #   - TP: LIMIT sell(long) / LIMIT buy(short) + reduceOnly  → 거래소에 걸림
     #   - SL: 거래소 주문 불가 → 엔진이 매 봉 close 에서 폴링하여 market_close() 호출
     # 라이브 계정에서는 STOP_MARKET 이 정상 동작하므로 그때만 폴백으로 시도.
-    def _place_tp_sl(self, order: Order, entry_price: float, qty: float) -> None:
-        """진입 후 TP/SL 주문 등록. 실제 fill_price 기준으로 가격 보정."""
+    @staticmethod
+    def _adjust_protection_prices(order: Order, entry_price: float) -> None:
+        """체결 슬리피지를 주문 객체에도 반영해 거래소·tracker를 일치시킨다."""
+        shift = float(entry_price) - float(order.price)
+        if order.tp_price > 0:
+            order.tp_price = float(order.tp_price) + shift
+        if order.sl_price > 0:
+            order.sl_price = float(order.sl_price) + shift
+
+    def _place_tp_sl(self, order: Order, entry_price: float, qty: float) -> bool:
+        """진입 후 TP/SL 주문 등록. 반환값은 SL 보호 성공 여부."""
         close_side = "sell" if order.direction == "long" else "buy"
-        # fill_price와 order.price 차이만큼 TP/SL 보정 (슬리피지 반영)
-        shift = entry_price - order.price
-        tp = order.tp_price + shift if order.tp_price > 0 else 0
-        sl = order.sl_price + shift if order.sl_price > 0 else 0
+        tp = order.tp_price
+        sl = order.sl_price
 
         # ── TP: LIMIT reduceOnly ─────────────────────────────────────
         if tp > 0:
@@ -114,10 +124,11 @@ class LiveBroker:
                 logger.warning("TP 등록 실패 %s: %s", order.symbol, e)
 
         # ── SL: 거래소 STOP_MARKET ──────────────────────────────────────
-        if sl > 0 and not self.dry_run:
-            self._place_sl_stop(order, close_side, float(qty), float(sl))
+        if sl <= 0 or self.dry_run:
+            return True
+        return self._place_sl_stop(order, close_side, float(qty), float(sl))
 
-    def _place_sl_stop(self, order: Order, close_side: str, qty: float, sl: float) -> None:
+    def _place_sl_stop(self, order: Order, close_side: str, qty: float, sl: float) -> bool:
         """SL STOP_MARKET 등록. 메인넷은 재시도 후 실패 시 경보(거래소 SL 부재=무방비 위험),
         testnet은 -4120 차단이 정상(sl_poller가 5m로 대체)이라 단발 로그만."""
         def _create() -> None:
@@ -133,7 +144,7 @@ class LiveBroker:
             except Exception as e:
                 logger.warning("SL 등록 실패(testnet 예상, sl_poller 대체): %s @%.4f — %s",
                                order.symbol, sl, e)
-            return
+            return True
 
         # 메인넷: STOP_MARKET이 유일한 거래소측 SL → 재시도 후 실패 시 경보.
         # reduceOnly라 혹시 중복 등록돼도 한 쪽만 청산·나머지는 무해(다음 봉 sync가 정리).
@@ -142,7 +153,7 @@ class LiveBroker:
             try:
                 _create()
                 logger.info("SL(STOP_MARKET) 등록: %s @%.4f", order.symbol, sl)
-                return
+                return True
             except Exception as e:
                 last_err = e
                 logger.warning("SL 등록 실패 재시도 %d/3 %s @%.4f — %s: %s",
@@ -152,6 +163,7 @@ class LiveBroker:
         logger.error("SL 거래소 등록 최종 실패: %s @%.4f — %s: %s (거래소 SL 없음, 엔진 1h 백업만)",
                      order.symbol, sl, type(last_err).__name__, last_err)
         self._notify_sl_failure(order, sl, last_err)
+        return False
 
     def _notify_sl_failure(self, order: Order, sl: float, err) -> None:
         if self.notifier is None or not getattr(self.notifier, "enabled", False):
@@ -298,20 +310,33 @@ class LiveBroker:
         # 수량 계산 (USD → 코인 수량)
         qty = size_usd / price
 
-        # 최소 수량/스텝 정밀도 맞추기
+        # 최소 수량/스텝 정밀도 맞추기. 의도한 노셔널을 초과하는
+        # 최소수량 bump는 절대 하지 않고 주문을 거부한다.
         try:
             market = self.exchange.market(symbol)
             qty = self.exchange.amount_to_precision(symbol, qty)
-            min_qty = market.get("limits", {}).get("amount", {}).get("min")
-            if min_qty is not None and float(qty) < float(min_qty):
-                logger.warning("qty %s < 최소 %s (%s), 최소값 사용", qty, min_qty, symbol)
-                qty = min_qty
-        except Exception:
+        except Exception as e:
+            if not self.dry_run:
+                raise RuntimeError(f"주문 시장정보/정밀도 확인 실패 {symbol}: {e}") from e
+            market = {}
             qty = round(qty, 6)
 
-        # 최소수량/정밀도 보정으로 실제 체결 수량이 의도(size_usd/price)와 달라질 수 있음.
-        # tracker가 거래소와 동일 노셔널을 기록하도록 order.size_usd를 실제 수량 기준으로 보정.
         final_qty = float(qty)
+        limits = market.get("limits", {}) if isinstance(market, dict) else {}
+        min_qty = limits.get("amount", {}).get("min")
+        min_cost = limits.get("cost", {}).get("min")
+        if final_qty <= 0:
+            raise ValueError(f"정밀도 반영 후 주문 수량이 0입니다: {symbol}")
+        if min_qty is not None and final_qty < float(min_qty):
+            raise ValueError(
+                f"주문 수량 {final_qty} < 최소 {float(min_qty)} ({symbol}); "
+                "리스크 초과 방지를 위해 진입 거부"
+            )
+        if min_cost is not None and final_qty * price < float(min_cost):
+            raise ValueError(
+                f"주문 금액 {final_qty * price:.8g} < 최소 {float(min_cost)} ({symbol}); "
+                "진입 거부"
+            )
 
         logger.info(
             "[%s] %s %s %.4f @ %.4f  (TP=%.4f SL=%.4f)  dry=%s",
@@ -460,8 +485,12 @@ class LiveBroker:
             raise ccxt.NetworkError("3회 재시도 후에도 주문 실패")
 
         fill_price = float(result.get("average") or result.get("price") or price)
+        result_qty = float(result.get("filled") or 0)
+        if result_qty > 0:
+            final_qty = result_qty
         # 실제 체결 수량×체결가 = 실제 노셔널 → tracker가 거래소와 동일 size 기록
         order.size_usd = final_qty * fill_price
+        self._adjust_protection_prices(order, fill_price)
         fee_info   = result.get("fee") or {}
         # 수수료는 USDT 표기일 때만 실측 사용 — feeBurn ON 계정은 currency='BNB'/cost=BNB수량이라
         # 그대로 쓰면 수백 배 과소 기록. 비USDT면 모델값 폴백.
@@ -480,8 +509,27 @@ class LiveBroker:
             timestamp=ts,
         )
 
-        # TP/SL 등록
-        self._place_tp_sl(order, fill_price, final_qty)
+        # TP/SL 등록. 메인넷에서 SL이 없는 포지션은 즉시 원상복구한다.
+        sl_ok = self._place_tp_sl(order, fill_price, final_qty)
+        if not sl_ok:
+            try:
+                self.market_close(order.symbol, order.direction, final_qty)
+            except Exception as close_err:
+                logger.critical(
+                    "SL 등록 실패 후 긴급청산도 실패 %s: %s", order.symbol, close_err
+                )
+                if self.notifier is not None and getattr(self.notifier, "enabled", False):
+                    try:
+                        self.notifier.notify_info(
+                            f"🚨 <b>{order.symbol}: SL 등록·긴급청산 모두 실패</b>\n"
+                            f"즉시 수동 청산 필요: {type(close_err).__name__}: {str(close_err)[:150]}"
+                        )
+                    except Exception:
+                        pass
+                raise RuntimeError(
+                    f"SL 등록 실패 후 긴급청산 실패: {order.symbol}"
+                ) from close_err
+            raise RuntimeError(f"SL 등록 실패로 진입 즉시 청산: {order.symbol}")
 
         self._notify_entry(order, fill_price)
         return fill
@@ -591,13 +639,31 @@ class LiveBroker:
         조회 실패 시 None — 빈 집합("포지션 없음")과 반드시 구분할 것.
         실패를 빈 집합으로 반환하면 호출부가 전 포지션을 stale로 오판해
         가짜 청산·SL 취소·중복 진입 연쇄가 발생한다 (2026-07-04 감사 CRITICAL)."""
+        details = self.fetch_open_positions()
+        return None if details is None else set(details)
+
+    def fetch_open_positions(self) -> dict[str, dict] | None:
+        """거래소 실포지션을 방향·수량·평단가까지 정규화해 반환."""
         try:
             positions = self.exchange.fetch_positions()
-            return {
-                p["symbol"].replace("/USDT:USDT", "USDT")
-                for p in positions
-                if float(p.get("contracts") or 0) != 0
-            }
+            result: dict[str, dict] = {}
+            for p in positions:
+                raw_contracts = float(p.get("contracts") or 0)
+                if raw_contracts == 0:
+                    continue
+                symbol = p["symbol"].replace("/USDT:USDT", "USDT")
+                raw_side = str(p.get("side") or "").lower()
+                direction = raw_side if raw_side in {"long", "short"} else (
+                    "long" if raw_contracts > 0 else "short"
+                )
+                result[symbol] = {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "contracts": abs(raw_contracts),
+                    "entry_price": float(p.get("entryPrice") or 0),
+                    "unrealized_pnl": float(p.get("unrealizedPnl") or 0),
+                }
+            return result
         except Exception as e:
             logger.warning("fetch_positions 실패 (판단 보류): %s", e)
             return None

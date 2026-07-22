@@ -531,7 +531,9 @@ class BacktestEngine:
         # 0. 거래소 포지션 sync (LiveBroker 전용)
         #    - tracker에 있는데 거래소에 없는 포지션은 TP 체결/수동 청산/외부 체결로 간주
         #    - 실제 체결가를 fetch_recent_fill_price로 조회 (없으면 close price 폴백)
-        if hasattr(self.broker, "fetch_open_symbols"):
+        if hasattr(self.broker, "fetch_open_symbols") and not getattr(
+            self.broker, "dry_run", False
+        ):
             try:
                 open_syms = self.broker.fetch_open_symbols()
                 if open_syms is None:

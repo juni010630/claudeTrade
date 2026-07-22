@@ -34,6 +34,23 @@ def test_ranging_regime(ranging_ohlcv):
     assert 0.0 <= state.bb_width_pct <= 1.0
 
 
+def test_nan_indicators_fail_closed_to_ranging():
+    timestamps = pd.date_range("2026-01-01", periods=80, freq="1h", tz="UTC")
+    flat = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": 100.0,
+        "high": 100.0,
+        "low": 100.0,
+        "close": 100.0,
+        "volume": 1.0,
+    })
+    state = RegimeDetector(primary_symbol="BTCUSDT", primary_tf="1h").classify(
+        _make_snapshot(flat)
+    )
+    assert state.regime == MarketRegime.RANGING
+    assert state.adx == 0.0
+
+
 def test_strategy_eligibility():
     # mean_reversion/macross_d는 전체 국면 허용 — 횡보 판정은 전략 내부 게이트 담당 (regime/filters.py)
     assert is_strategy_eligible(MarketRegime.RANGING, "mean_reversion")

@@ -1,6 +1,7 @@
 """시장 국면 분류기."""
 from __future__ import annotations
 
+import math
 import pandas as pd
 
 from data.schemas import MarketSnapshot
@@ -52,9 +53,23 @@ class RegimeDetector:
         current_adx = float(adx_series.iloc[-1])
         current_bw = float(bw_series.iloc[-1])
 
+        # 지표 NaN/무한대는 비교식을 모두 False로 만들어 기존 else의
+        # TRENDING으로 새었다. 불완전 데이터에서는 진입을 줄이도록 fail-closed.
+        if not math.isfinite(current_adx) or not math.isfinite(current_bw):
+            state = RegimeState(
+                regime=MarketRegime.RANGING,
+                adx=current_adx if math.isfinite(current_adx) else 0.0,
+                bb_width=current_bw if math.isfinite(current_bw) else 0.0,
+                bb_width_pct=1.0,
+                timestamp=snapshot.timestamp,
+            )
+            self._last_state = state
+            return state
+
         # BB 폭의 최근 N봉 중 백분위 계산
         recent_bw = bw_series.iloc[-self.bb_width_lookback :]
-        pct_rank = float((recent_bw < current_bw).mean())  # 0~1
+        recent_bw = recent_bw.dropna()
+        pct_rank = float((recent_bw < current_bw).mean()) if len(recent_bw) else 1.0
 
         # 국면 분류
         if current_adx > self.adx_trending:

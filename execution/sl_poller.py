@@ -109,8 +109,9 @@ class SLPoller:
                 pos = st.positions.get(sym)
                 if pos is None:
                     continue
-                # 진입 봉 이후의 완성봉만 (같은 봉 noise 제외)
-                relevant = [(h, l) for (bts, h, l) in new_bars if bts > pos.opened_at]
+                # opened_at은 신호봉 close 시각이고 5m bar timestamp는 open
+                # 시각이므로, 동일 timestamp의 첫 완성 5m 봉도 포함한다.
+                relevant = [(h, l) for (bts, h, l) in new_bars if bts >= pos.opened_at]
                 if not relevant:
                     continue
                 bar_h = max(h for h, l in relevant)

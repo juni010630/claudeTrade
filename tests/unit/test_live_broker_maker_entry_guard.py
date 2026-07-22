@@ -32,6 +32,9 @@ class _FakeExchange:
     def amount_to_precision(self, s, q):
         return f"{float(q):.3f}"
 
+    def market(self, symbol):
+        return {"limits": {"amount": {"min": 0.001}, "cost": {"min": 1.0}}}
+
     def set_leverage(self, lev, symbol):
         pass
 

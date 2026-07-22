@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from execution.live_broker import LiveBroker
 from execution.models import Order, OrderSide, OrderType
@@ -30,6 +31,7 @@ class _SLFailExchange:
     def __init__(self):
         self.stop_calls = 0
         self.limit_calls = 0
+        self.market_calls = 0
 
     def market(self, symbol):
         return {"limits": {"amount": {"min": 0.0}}}
@@ -48,6 +50,7 @@ class _SLFailExchange:
             self.limit_calls += 1
             return {}
         if type_ == "market":
+            self.market_calls += 1
             return {"average": 100.0, "fee": {"cost": 0.05}}
         return {}
 
@@ -66,8 +69,10 @@ def test_mainnet_sl_failure_retries_and_alerts(monkeypatch):
     ex = _SLFailExchange()
     notif = _RecNotifier()
     broker = LiveBroker(ex, dry_run=False, notifier=notif, demo=False)  # 메인넷
-    broker.submit(_order())
+    with pytest.raises(RuntimeError, match="즉시 청산"):
+        broker.submit(_order())
     assert ex.stop_calls == 3                  # 3회 재시도
+    assert ex.market_calls == 2                # 진입 1회 + 긴급 reduceOnly 청산 1회
     assert len(notif.info_msgs) == 1           # 최종 실패 경보 1회
     assert "SL 등록 실패" in notif.info_msgs[0]
 

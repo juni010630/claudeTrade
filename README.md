@@ -14,11 +14,11 @@ cp .env.example .env
 # BINANCE_API_KEY, BINANCE_SECRET 입력
 
 # 3. 데이터 다운로드 (최초 1회)
-python scripts/fetch_data.py --params config/final_v13_eth.yaml
+python scripts/fetch_data.py --params config/final_v21d_eexit.yaml
 
 # 4. 실행
-python scripts/live_trade.py --params config/final_v13_eth.yaml           # 테스트넷
-python scripts/live_trade.py --params config/final_v13_eth.yaml --no-demo # 실계정
+python scripts/live_trade.py --params config/final_v21d_eexit.yaml           # 테스트넷
+python scripts/live_trade.py --params config/final_v21d_eexit.yaml --no-demo # 실계정
 ```
 
 ## 바이낸스 API 키 발급
@@ -103,19 +103,19 @@ BINANCE_SECRET=xYz9876543210...
 
 ```bash
 # 백테스트 (검증용)
-python scripts/run_backtest.py --params config/final_v13_eth.yaml
+python scripts/run_backtest.py --params config/final_v21d_eexit.yaml
 
 # 테스트넷 (기본, --no-demo 없으면 자동 테스트넷)
-python scripts/live_trade.py --params config/final_v13_eth.yaml
+python scripts/live_trade.py --params config/final_v21d_eexit.yaml
 
 # 실계정 (주의!)
-python scripts/live_trade.py --params config/final_v13_eth.yaml --no-demo
+python scripts/live_trade.py --params config/final_v21d_eexit.yaml --no-demo
 
 # 즉시 1회 실행 (연결 테스트)
-python scripts/live_trade.py --params config/final_v13_eth.yaml --snap-now
+python scripts/live_trade.py --params config/final_v21d_eexit.yaml --snap-now
 
 # 주문 없이 로그만
-python scripts/live_trade.py --params config/final_v13_eth.yaml --dry-run
+python scripts/live_trade.py --params config/final_v21d_eexit.yaml --dry-run
 ```
 
 ## 텔레그램 알림 (선택)
@@ -124,7 +124,7 @@ python scripts/live_trade.py --params config/final_v13_eth.yaml --dry-run
 2. 봇에 메시지 전송 후 chat_id 확인
 3. `.env`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 입력
 
-## 리스크 설정 (final_v13_eth)
+## 과거 검증 기준 리스크 설정 (final_v13_eth, 참고용)
 
 - risk_per_trade: 9.9%
 - SS (score 5+): 40x / 30% size

@@ -15,7 +15,12 @@ def rsi(df: pd.DataFrame, period: int = 14, col: str = "close") -> pd.Series:
     gain = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(span=period, adjust=False).mean()
     rs = gain / loss.replace(0, float("nan"))
-    return 100 - (100 / (1 + rs))
+    result = 100 - (100 / (1 + rs))
+    # 0으로 나누는 경계값은 NaN이 아니라 RSI 정의상 다음과 같다.
+    result = result.mask((gain > 0) & (loss == 0), 100.0)
+    result = result.mask((gain == 0) & (loss > 0), 0.0)
+    result = result.mask((gain == 0) & (loss == 0), 50.0)
+    return result
 
 
 def volume_ratio(df: pd.DataFrame, period: int = 20) -> pd.Series:

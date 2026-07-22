@@ -1,0 +1,18 @@
+[Unit]
+Description=Binance Futures Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/claudeTrade
+ExecStart=/home/ubuntu/claudeTrade/venv/bin/python3 scripts/live_trade.py --no-demo --params config/final_v21d_eexit.yaml
+Restart=always
+RestartSec=30
+KillSignal=SIGINT
+TimeoutStopSec=60
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
