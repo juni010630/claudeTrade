@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -54,6 +55,28 @@ DEFAULT_PARAMS = "config/final_v21d_eexit.yaml"
 # 해제(수동): rm data/deep_floor_halt.json && sudo systemctl restart trade-bot
 DEEP_FLOOR_HALT = Path("data/deep_floor_halt.json")
 DRY_STATE_PATH = Path("data/state_dryrun.json")
+REPLAY_SEED_PATH = Path("data/live_replay_seed.json")
+
+
+def save_replay_seed(engine, params_path: Path, primary_tf: str) -> None:
+    """현재 배포의 라이브 시작 상태를 리플레이가 그대로 이어받도록 고정한다."""
+    started_at = pd.Timestamp.now(tz="UTC")
+    anchor = started_at.ceil(primary_tf)
+    state_store.save(engine.tracker.snapshot(), path=REPLAY_SEED_PATH, engine=engine)
+    data = json.loads(REPLAY_SEED_PATH.read_text())
+    data.update({
+        "session_started_at": started_at.isoformat(),
+        "anchor": anchor.isoformat(),
+        "config": str(params_path),
+        "config_sha256": hashlib.sha256(params_path.read_bytes()).hexdigest(),
+        "last_day": (engine._last_day.isoformat()
+                     if getattr(engine, "_last_day", None) is not None else None),
+    })
+    tmp = REPLAY_SEED_PATH.with_suffix(REPLAY_SEED_PATH.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    tmp.replace(REPLAY_SEED_PATH)
+    logger.info("리플레이 시드 저장: anchor=%s, positions=%d", anchor,
+                engine.tracker.snapshot().open_position_count)
 
 
 # ── ccxt Exchange 생성 ────────────────────────────────────────────
@@ -261,6 +284,11 @@ def main() -> None:
     except Exception as e:
         logger.error("잔고 조회 실패: %s", e)
         if not dry_run:
+            if notifier and notifier.enabled:
+                notifier.send_and_wait(
+                    f"🚨 <b>기동 중단 — 잔고 조회 실패</b>\n{type(e).__name__}: {str(e)[:200]}",
+                    timeout=30,
+                )
             sys.exit(1)
 
     # 시계오차 가드: 로컬 시계가 거래소보다 >30s 앞서면 forming(미마감) 봉을
@@ -274,7 +302,7 @@ def main() -> None:
             logger.critical(msg)
             if notifier and notifier.enabled:
                 try:
-                    notifier.notify_info(msg)
+                    notifier.send_and_wait(msg, timeout=30)
                 except Exception:
                     pass
             if not dry_run:
@@ -302,9 +330,10 @@ def main() -> None:
             logger.critical("기동 포지션 검증 실패: %s", e)
             if notifier and notifier.enabled:
                 try:
-                    notifier.notify_info(
+                    notifier.send_and_wait(
                         f"🚨 <b>기동 중단 — 포지션 검증 실패</b>\n{str(e)[:300]}\n"
-                        "저장 state와 거래소를 확인한 뒤 재시작하세요."
+                        "저장 state와 거래소를 확인한 뒤 재시작하세요.",
+                        timeout=30,
                     )
                 except Exception:
                     pass
@@ -377,6 +406,9 @@ def main() -> None:
                     pass
 
     logger.info("엔진 초기화 완료 (전략 %d개)", len(engine.strategies))
+
+    if not dry_run:
+        save_replay_seed(engine, params_path, params.get("primary_timeframe", "1h"))
 
     # LiveFeed 생성
     symbols    = params["symbols"]
@@ -739,7 +771,8 @@ def main() -> None:
                 msg += f"\n<pre>{tb}</pre>"
             try:
                 notifier.notify_info(msg)
-                time.sleep(1)  # 텔레그램 전송 완료 대기
+                if not notifier.flush(timeout=20):
+                    logger.warning("종료 알림 flush 시간 초과")
             except Exception:
                 logger.warning("종료 알림 전송 실패")
 

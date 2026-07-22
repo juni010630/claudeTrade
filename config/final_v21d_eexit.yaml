@@ -86,10 +86,10 @@ strategy_leverage_tiers:
       size_fraction: 0.5
       risk_per_trade: 0.02
 strategy_capital_fraction:
-  ema_cross: 0.3
-  multi_tf_breakout: 0.3
-  mean_reversion: 0.35
-  macross_d: 0.35
+  ema_cross: 0.25
+  multi_tf_breakout: 0.25
+  mean_reversion: 0.375
+  macross_d: 0.375
 primary_timeframe: 1h
 regime:
   adx_period: 14

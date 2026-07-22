@@ -1,8 +1,8 @@
 """라이브 엣지부패 모니터 — 매일 1회 (systemd timer), 프로덕션 무수정.
 
-① 신호 패리티: ANCHOR부터 현재까지 v21d 리플레이 vs 라이브 실체결(trades.csv +
+① 신호 패리티: 설정 버전별 anchor부터 현재까지 리플레이 vs 라이브 실체결(trades.csv +
    state.json 보유 포지션) 진입 이벤트 대조. 설명 불가능한 불일치 = WARN.
-   (경로의존 때문에 윈도우 분할 금지 — 항상 ANCHOR부터 전체 리플레이)
+   (경로의존 때문에 윈도우 분할 금지 — 항상 해당 배포 anchor부터 전체 리플레이)
 ② 체결 품질: 매칭된 진입의 라이브 vs 리플레이 가격 괴리(bps, +=불리).
    중앙값 > 15bps 또는 단건 > 50bps = WARN. (백테 가정 5bps)
 ③ 엣지부패: 일별 equity 로그의 30d/90d 수익률을 백테 분포
@@ -14,8 +14,8 @@
 
 알림: 새 WARN/ALERT 또는 해소 후 재발 시 즉시, 월요일엔 주간 요약.
 동일한 과거 이상을 매일 재전송하지 않는다. 실행 실패는 항상 텔레그램.
-재배포(config 변경) 시: ANCHOR/CONFIG/BASELINE 갱신 + 베이스라인 재생성 필수.
-(ANCHOR_CAPITAL은 라이브 잔고 자동조회로 대체 — 신호/슬리피지 패리티엔 무관해 정밀값 불요.)
+재배포(config 변경) 시 config hash로 anchor를 자동 갱신하고, live_trade가 시작 상태를
+리플레이 시드로 저장한다. 베이스라인 hash가 다르면 즉시 운영 경보를 낸다.
 
 사용:
   python scripts/edge_monitor.py                # 정기 실행 (timer)
@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -41,6 +41,7 @@ import pandas as pd
 import yaml
 
 from data.loader import DataLoader
+from portfolio import state_store
 from risk.circuit_breaker import BreakerStatus, CircuitBreaker
 import scripts.run_backtest as rb
 
@@ -48,13 +49,8 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("edge_monitor")
 
-# ── 기준점 (재배포 시 갱신) ───────────────────────────────────────
-ANCHOR = pd.Timestamp("2026-07-03 18:00", tz="UTC")  # 2026-07-03 감사수정 배포(그룹A+B1~B4) 재시작 → 첫 1h봉 18:00.
-#   날짜만(00:00)으로 두면 재시작 전 ~23h를 리플레이가 현행 엔진으로 덮어, state.json 이월 포지션(앵커 이전
-#   진입분)을 flat-start 리플레이가 앵커에서 재진입 → '리플레이에만 존재' 오경보(2026-06-20 UNI/ARPA MR 사례).
-#   이번 배포 = 엔진 동작 변경(CB 앵커·상관정렬·FIL 부활·상폐 타임아웃) 포함 → 구엔진 라이브 이력과의
-#   패리티 오염 방지 위해 ANCHOR 리셋(2026-07-04 감사). 이월 포지션의 전환윈도 오경보 가능(무시).
-#   재배포 시 ANCHOR = 실제 systemctl 재시작 시각의 다음 1h봉 경계로 갱신할 것(systemctl show -p ExecMainStartTimestamp).
+# ── 기준점 폴백 (최초 마이그레이션에만 사용; 이후 hash별 상태파일 자동관리) ──
+ANCHOR = pd.Timestamp("2026-07-03 18:00", tz="UTC")
 CONFIG = "config/final_v21d_eexit.yaml"   # 2026-06-19 v21d 배포 (v21c + 반대신호 조기청산)
 BASELINE = "config/edge_baseline_v21d.json"  # 생성 전엔 ③ 자동 스킵 (31일 누적 후 발동)
 # replay 시작 자본: 신호/슬리피지 패리티엔 무관(포지션 사이즈만 스케일하고, ③ 롤링은
@@ -68,6 +64,8 @@ EQUITY_LOG = Path("data/edge_equity_log.csv")
 TRADES_CSV = Path("trades.csv")
 STATE_JSON = Path("data/state.json")
 ALERT_STATE_JSON = Path("data/edge_alert_state.json")
+ANCHOR_STATE_JSON = Path("data/edge_replay_anchor.json")
+REPLAY_SEED_JSON = Path("data/live_replay_seed.json")
 
 # ── 사전선언 임계 (사후 완화 금지) ────────────────────────────────
 SLIP_MED_WARN_BPS = 15.0   # 매칭 진입 슬리피지 중앙값
@@ -89,8 +87,84 @@ def _load_env() -> None:
                 os.environ.setdefault(k.strip(), v.strip())
 
 
+def _config_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _bar_boundary(ts: pd.Timestamp, timeframe: str) -> pd.Timestamp:
+    ts = _ts(ts)
+    return ts.ceil(timeframe)
+
+
+def resolve_anchor(
+    config_path: Path,
+    *,
+    timeframe: str,
+    state_path: Path = ANCHOR_STATE_JSON,
+    seed_path: Path = REPLAY_SEED_JSON,
+    fallback: pd.Timestamp = ANCHOR,
+    explicit: str | None = None,
+) -> tuple[pd.Timestamp, bool]:
+    """설정 버전별 리플레이 기준점을 보존한다.
+
+    같은 설정이면 저장된 기준점을 재사용하고, 설정 내용이 바뀌면 파일 배포시각의
+    다음 완성 봉부터 새 리플레이로 전환한다. 구 설정 라이브 이력을 현 설정으로
+    덮어 재생하던 가장 큰 패리티 오염 원인을 제거한다.
+    """
+    digest = _config_sha256(config_path)
+    previous = None
+    if state_path.exists():
+        try:
+            previous = json.loads(state_path.read_text())
+        except (OSError, ValueError, TypeError) as e:
+            logger.warning("리플레이 기준점 상태 손상 — 재생성: %s", e)
+
+    seed_anchor = None
+    if seed_path.exists():
+        try:
+            seed_data = json.loads(seed_path.read_text())
+            if seed_data.get("config_sha256") == digest:
+                seed_anchor = _ts(seed_data["anchor"])
+        except (OSError, ValueError, TypeError, KeyError) as e:
+            logger.warning("리플레이 시드 기준점 읽기 실패: %s", e)
+
+    if explicit:
+        anchor = _bar_boundary(pd.Timestamp(explicit), timeframe)
+    elif seed_anchor is not None and (
+        not previous or seed_anchor > _ts(previous.get("anchor", fallback))
+    ):
+        # config가 같아도 라이브 프로세스 재시작 시 새 시작상태를 기준으로 재앵커한다.
+        anchor = seed_anchor
+    elif previous and previous.get("config_sha256") == digest:
+        anchor = _ts(previous["anchor"])
+    else:
+        deployed_at = pd.Timestamp(config_path.stat().st_mtime, unit="s", tz="UTC")
+        anchor = max(_ts(fallback), _bar_boundary(deployed_at, timeframe))
+
+    changed = (
+        not previous
+        or previous.get("config_sha256") != digest
+        or _ts(previous.get("anchor", anchor)) != anchor
+        or explicit is not None
+    )
+    payload = {
+        "anchor": anchor.isoformat(),
+        "config": str(config_path),
+        "config_sha256": digest,
+        "config_mtime": pd.Timestamp(config_path.stat().st_mtime, unit="s", tz="UTC").isoformat(),
+        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
+    }
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    tmp_path.replace(state_path)
+    if changed:
+        logger.info("리플레이 기준점 갱신: %s (config %s)", anchor, digest[:12])
+    return anchor, changed
+
+
 # ── ① 데이터 갱신 (증분) ──────────────────────────────────────────
-def refresh_cache(symbols: list[str], timeframes: list[str]) -> None:
+def refresh_cache(symbols: list[str], timeframes: list[str], anchor: pd.Timestamp) -> None:
     ex = ccxt.binanceusdm({"enableRateLimit": True})
     now_ms = ex.milliseconds()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,7 +176,7 @@ def refresh_cache(symbols: list[str], timeframes: list[str]) -> None:
             old = pd.read_parquet(path) if path.exists() else None
             since_ms = (int(old["timestamp"].max().timestamp() * 1000) + tf_ms
                         if old is not None and len(old)
-                        else int(ANCHOR.timestamp() * 1000) - _PREFETCH_BARS * tf_ms)
+                        else int(anchor.timestamp() * 1000) - _PREFETCH_BARS * tf_ms)
             rows = []
             while since_ms < now_ms:
                 batch = ex.fetch_ohlcv(sym, tf, since=since_ms, limit=1000)
@@ -126,7 +200,7 @@ def refresh_cache(symbols: list[str], timeframes: list[str]) -> None:
         fold = pd.read_parquet(fpath) if fpath.exists() else None
         fsince = (int(fold["timestamp"].max().timestamp() * 1000) + 1
                   if fold is not None and len(fold)
-                  else int(ANCHOR.timestamp() * 1000) - 3 * 86_400_000)
+                  else int(anchor.timestamp() * 1000) - 3 * 86_400_000)
         frows = []
         while True:
             batch = ex.fetch_funding_rate_history(sym, since=fsince, limit=1000)
@@ -149,7 +223,33 @@ def refresh_cache(symbols: list[str], timeframes: list[str]) -> None:
 
 
 # ── ② 리플레이 ────────────────────────────────────────────────────
-def run_replay(p: dict, capital: float):
+def load_replay_seed(
+    config_path: Path,
+    anchor: pd.Timestamp,
+    seed_path: Path = REPLAY_SEED_JSON,
+) -> tuple[Path | None, float | None]:
+    if not seed_path.exists():
+        return None, None
+    try:
+        data = json.loads(seed_path.read_text())
+        if data.get("config_sha256") != _config_sha256(config_path):
+            logger.warning("리플레이 시드 설정 버전 불일치 — flat 시작")
+            return None, None
+        if _ts(data["anchor"]) != _ts(anchor):
+            logger.warning("리플레이 시드 anchor 불일치 — flat 시작")
+            return None, None
+        return seed_path, float(data["equity"])
+    except (OSError, ValueError, TypeError, KeyError) as e:
+        logger.warning("리플레이 시드 손상 — flat 시작: %s", e)
+        return None, None
+
+
+def run_replay(
+    p: dict,
+    capital: float,
+    anchor: pd.Timestamp,
+    seed_path: Path | None = None,
+):
     loader = DataLoader(
         symbols=p["symbols"], timeframes=p["timeframes"],
         primary_tf=p.get("primary_timeframe", "1h"),
@@ -157,10 +257,23 @@ def run_replay(p: dict, capital: float):
         lookback=p.get("data", {}).get("lookback_bars", 300),
     )
     engine = rb.build_engine(p, capital)
+    if seed_path is not None:
+        seed_meta = json.loads(seed_path.read_text())
+        seed = state_store.load(seed_path)
+        if seed is None:
+            raise RuntimeError(f"검증된 리플레이 시드를 읽을 수 없음: {seed_path}")
+        engine.tracker.state = seed
+        state_store.restore_runtime(engine, path=seed_path)
+        if seed_meta.get("last_day"):
+            engine._last_day = _ts(seed_meta["last_day"])
+        if seed_meta.get("session_started_at"):
+            engine.funding_sim.sync_to(_ts(seed_meta["session_started_at"]))
+        logger.info("리플레이 라이브 시작상태 복원: equity=%.2f, positions=%d",
+                    seed.equity, len(seed.positions))
     # loader.iterate의 since는 봉 open 기준, 스냅샷 timestamp는 close 기준(open+1h).
     # 라이브가 ANCHOR 정각에 처리한 스냅샷(= open ANCHOR-1h 봉)을 포함하려면 1h 앞당김.
     primary_delta = pd.Timedelta(p.get("primary_timeframe", "1h"))
-    engine.run(loader.iterate(since=ANCHOR - primary_delta))
+    engine.run(loader.iterate(since=anchor - primary_delta))
     return engine
 
 
@@ -169,14 +282,14 @@ _EVENT_COLS = ["symbol", "strategy", "direction", "entry_time", "entry_price",
                "status", "exit_time", "exit_price", "exit_reason"]
 
 
-def live_entries() -> pd.DataFrame:
+def live_entries(anchor: pd.Timestamp) -> pd.DataFrame:
     rows = []
     if TRADES_CSV.exists():
         df = pd.read_csv(TRADES_CSV)
         for _, r in df.iterrows():
             et = pd.Timestamp(r["entry_time"])
             et = et.tz_localize("UTC") if et.tzinfo is None else et.tz_convert("UTC")
-            if et < ANCHOR:
+            if et < anchor:
                 continue
             xt = pd.Timestamp(r["exit_time"])
             xt = xt.tz_localize("UTC") if xt.tzinfo is None else xt.tz_convert("UTC")
@@ -190,7 +303,7 @@ def live_entries() -> pd.DataFrame:
         for sym, pos in data.get("positions", {}).items():
             ot = pd.Timestamp(pos["opened_at"])
             ot = ot.tz_localize("UTC") if ot.tzinfo is None else ot.tz_convert("UTC")
-            if ot < ANCHOR:
+            if ot < anchor:
                 continue
             rows.append(dict(symbol=sym, strategy=pos["strategy"],
                              direction=pos["direction"], entry_time=ot,
@@ -199,14 +312,18 @@ def live_entries() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=_EVENT_COLS)
 
 
-def replay_entries(engine) -> pd.DataFrame:
+def replay_entries(engine, anchor: pd.Timestamp) -> pd.DataFrame:
     rows = []
     for r in engine.ledger.records:
+        if _ts(r.entry_time) < anchor:
+            continue  # 시드로 이월된 포지션은 경로에는 반영하되 신규 진입 비교에서 제외
         rows.append(dict(symbol=r.symbol, strategy=r.strategy, direction=r.direction,
                          entry_time=r.entry_time, entry_price=r.entry_price,
                          status="closed", exit_time=r.exit_time,
                          exit_price=r.exit_price, exit_reason=r.exit_reason))
     for sym, pos in engine.tracker.snapshot().positions.items():
+        if _ts(pos.opened_at) < anchor:
+            continue
         rows.append(dict(symbol=sym, strategy=pos.strategy, direction=pos.direction,
                          entry_time=pos.opened_at, entry_price=pos.entry_price,
                          status="open", exit_time=None, exit_price=None, exit_reason=None))
@@ -215,24 +332,31 @@ def replay_entries(engine) -> pd.DataFrame:
 
 # ── ④ 대조 ────────────────────────────────────────────────────────
 def match_events(live: pd.DataFrame, rep: pd.DataFrame):
-    matched, live_used = [], set()
-    rep_only = []
-    for _, rr in rep.iterrows():
-        cand = None
-        for li, lr in live.iterrows():
-            if li in live_used:
-                continue
+    """동일 이벤트 후보 전체에서 시간차가 가장 작은 쌍부터 매칭한다.
+
+    CSV 행 순서에 따라 첫 후보를 집던 기존 방식은 같은 전략이 연속 진입하면 더 먼
+    이벤트끼리 붙여 가짜 live-only/replay-only를 만들 수 있었다.
+    """
+    live_rows = [r for _, r in live.iterrows()]
+    rep_rows = [r for _, r in rep.iterrows()]
+    candidates = []
+    for li, lr in enumerate(live_rows):
+        for ri, rr in enumerate(rep_rows):
+            delta = abs(lr["entry_time"] - rr["entry_time"])
             if (lr["symbol"] == rr["symbol"] and lr["strategy"] == rr["strategy"]
-                    and lr["direction"] == rr["direction"]
-                    and abs(lr["entry_time"] - rr["entry_time"]) <= MATCH_TOL):
-                cand = li
-                break
-        if cand is None:
-            rep_only.append(rr)
-        else:
-            live_used.add(cand)
-            matched.append((live.loc[cand], rr))
-    live_only = [lr for li, lr in live.iterrows() if li not in live_used]
+                    and lr["direction"] == rr["direction"] and delta <= MATCH_TOL):
+                candidates.append((delta, li, ri))
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+    live_used, rep_used = set(), set()
+    matched = []
+    for _, li, ri in candidates:
+        if li in live_used or ri in rep_used:
+            continue
+        live_used.add(li)
+        rep_used.add(ri)
+        matched.append((live_rows[li], rep_rows[ri]))
+    live_only = [r for i, r in enumerate(live_rows) if i not in live_used]
+    rep_only = [r for i, r in enumerate(rep_rows) if i not in rep_used]
     return matched, live_only, rep_only
 
 
@@ -398,18 +522,24 @@ def classify_miss(rr, history, corr_cache, g) -> tuple[str, bool]:
 def _timing_pairs(rep_only, live_only) -> dict:
     """rep_only↔live_only 동일(심볼·전략·방향) 근접진입(1h<Δ≤36h)=타이밍시프트 페어.
     id(row)→상대 진입시각 문자열."""
-    out, used = {}, set()
-    for rr in rep_only:
-        for i, lr in enumerate(live_only):
-            if i in used:
-                continue
+    out, rep_used, live_used = {}, set(), set()
+    candidates = []
+    for ri, rr in enumerate(rep_only):
+        for li, lr in enumerate(live_only):
+            delta = abs(lr["entry_time"] - rr["entry_time"])
             if (lr["symbol"] == rr["symbol"] and lr["strategy"] == rr["strategy"]
                     and lr["direction"] == rr["direction"]
-                    and MATCH_TOL < abs(lr["entry_time"] - rr["entry_time"]) <= pd.Timedelta(hours=36)):
-                used.add(i)
-                out[id(rr)] = f"{lr['entry_time']:%m-%d %H:%M}"
-                out[id(lr)] = f"{rr['entry_time']:%m-%d %H:%M}"
-                break
+                    and MATCH_TOL < delta <= pd.Timedelta(hours=36)):
+                candidates.append((delta, ri, li))
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+    for _, ri, li in candidates:
+        if ri in rep_used or li in live_used:
+            continue
+        rep_used.add(ri)
+        live_used.add(li)
+        rr, lr = rep_only[ri], live_only[li]
+        out[id(rr)] = f"{lr['entry_time']:%m-%d %H:%M}"
+        out[id(lr)] = f"{rr['entry_time']:%m-%d %H:%M}"
     return out
 
 
@@ -446,14 +576,27 @@ def append_equity_log(usdt: float | None) -> None:
     logger.info("equity 로그: %s $%.2f", today, usdt)
 
 
-def rolling_percentiles() -> list[str]:
-    """30d/90d 라이브 수익률 → 백테 분포 백분위. 표본 부족 시 빈 리스트."""
-    if not EQUITY_LOG.exists() or not Path(BASELINE).exists():
-        return []
+def rolling_percentiles(
+    *,
+    config_path: Path = Path(CONFIG),
+    baseline_path: Path = Path(BASELINE),
+) -> tuple[list[str], set[str]]:
+    """30d/90d 백분위와 운영 결함을 함께 반환한다."""
+    if not baseline_path.exists():
+        return [f"③ 엣지부패: 베이스라인 없음 ({baseline_path}) ⚠️"], {"baseline:missing"}
+    try:
+        baseline = json.loads(baseline_path.read_text())
+    except (OSError, ValueError, TypeError) as e:
+        return [f"③ 엣지부패: 베이스라인 손상 ({type(e).__name__}) ⚠️"], {"baseline:invalid"}
+    expected_hash = _config_sha256(config_path)
+    if baseline.get("config_sha256") != expected_hash:
+        return ["③ 엣지부패: 현재 설정과 베이스라인 버전 불일치 ⚠️"], {"baseline:stale"}
+    if not EQUITY_LOG.exists():
+        return ["③ 롤링: equity 로그 0/31일 — 누적 중"], set()
     eq = pd.read_csv(EQUITY_LOG, parse_dates=["date"]).sort_values("date").reset_index(drop=True)
     if len(eq) < 31:
-        return [f"③ 롤링: 표본 {len(eq)}/31일 — 누적 중"]
-    grids = json.loads(Path(BASELINE).read_text())["grids"]
+        return [f"③ 롤링: 표본 {len(eq)}/31일 — 누적 중"], set()
+    grids = baseline["grids"]
     last_date = eq["date"].iloc[-1]
     last_eq = eq["equity"].iloc[-1]
     out = []
@@ -471,7 +614,7 @@ def rolling_percentiles() -> list[str]:
         pctl = float(np.interp(ret, g["values"], g["percentiles"]))
         flag = " 🚨ALERT" if pctl < PCTL_ALERT else ""
         out.append(f"③ {name} 수익률 {ret:+.1%} = 백테 p{pctl:.0f}{flag}")
-    return out
+    return out, set()
 
 
 # ── ⑥ 경보 상태 전이/중복 억제 ───────────────────────────────────
@@ -481,15 +624,16 @@ def should_notify_alert_transition(
     is_monday: bool = False,
     force: bool = False,
     state_path: Path = ALERT_STATE_JSON,
+    persist: bool = True,
 ) -> bool:
-    """현재 활성 경보 집합을 저장하고 새 경보가 생겼을 때만 즉시 알린다.
+    """신규·해소를 포함한 경보 상태 변화 여부를 판정한다.
 
     edge replay는 ANCHOR부터 전구간을 매일 다시 계산하므로, 과거 불일치 한 건도
     해소될 때까지 매일 WARN으로 재검출된다. 경보의 존재가 아니라 상태 전이
     (신규/해소 후 재발)를 알림 조건으로 삼아 경보 피로를 막는다.
 
-    상태 파일이 처음 생기는 배포 실행은 현재 경보를 기준선으로만 등록한다.
-    실제 실행 예외는 이 함수 밖의 except 경로에서 언제나 즉시 전송된다.
+    초기 실행에서 발견된 경보와 해소도 알린다. ``persist=False``는 실제 Telegram
+    전달 성공 뒤 상태를 확정해야 하는 단발성 모니터가 사용한다.
     """
     state_exists = state_path.exists()
     previous: set[str] = set()
@@ -501,7 +645,18 @@ def should_notify_alert_transition(
             # 손상/읽기 실패는 신규 경보를 침묵시키지 않도록 빈 상태로 간주한다.
             logger.warning("edge 경보 상태 읽기 실패 — 신규 상태로 복구: %s", e)
 
-    new_alerts = active_alerts - previous
+    changed = active_alerts != previous
+    if persist:
+        save_alert_state(active_alerts, state_path=state_path)
+
+    if force or is_monday:
+        return True
+    if not state_exists:
+        logger.info("edge 경보 상태 생성: 활성 %d건", len(active_alerts))
+    return changed
+
+
+def save_alert_state(active_alerts: set[str], *, state_path: Path = ALERT_STATE_JSON) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
     payload = {
@@ -511,20 +666,13 @@ def should_notify_alert_transition(
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     tmp_path.replace(state_path)
 
-    if force or is_monday:
-        return True
-    if not state_exists:
-        logger.info("edge 경보 상태 기준선 생성: 활성 %d건 (초기 중복알림 억제)",
-                    len(active_alerts))
-        return False
-    return bool(new_alerts)
-
 
 # ── 메인 ──────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--force-notify", action="store_true")
     parser.add_argument("--no-balance", action="store_true")
+    parser.add_argument("--anchor", help="리플레이 기준 UTC 시각 강제 지정(다음 봉 경계로 정렬)")
     args = parser.parse_args()
     _load_env()
 
@@ -534,19 +682,29 @@ def main() -> None:
     try:
         with open(CONFIG) as f:
             p = yaml.safe_load(f)
+        config_path = Path(CONFIG)
+        primary_tf = p.get("primary_timeframe", "1h")
+        anchor, anchor_changed = resolve_anchor(
+            config_path, timeframe=primary_tf, explicit=args.anchor,
+        )
         usdt = None if args.no_balance else fetch_usdt_balance()
-        capital = usdt if usdt else ANCHOR_CAPITAL_FALLBACK
-        refresh_cache(p["symbols"], p["timeframes"])
-        engine = run_replay(p, capital)
-        live = live_entries()
-        rep = replay_entries(engine)
+        seed_path, seed_capital = load_replay_seed(config_path, anchor)
+        capital = seed_capital or usdt or ANCHOR_CAPITAL_FALLBACK
+        refresh_cache(p["symbols"], p["timeframes"], anchor)
+        engine = run_replay(p, capital, anchor, seed_path=seed_path)
+        live = live_entries(anchor)
+        rep = replay_entries(engine, anchor)
         matched, live_only, rep_only = match_events(live, rep)
         append_equity_log(usdt)
 
         lines, severity = [], "OK"
         active_alerts: set[str] = set()
-        days = max(0, (pd.Timestamp.now(tz="UTC") - ANCHOR).days)
-        lines.append(f"기간 {ANCHOR.date()}~ ({days}일) | 라이브 {len(live)}건 / 리플레이 {len(rep)}건")
+        days = max(0, (pd.Timestamp.now(tz="UTC") - anchor).days)
+        seed_label = "live-state" if seed_path else "flat"
+        lines.append(f"기간 {anchor:%Y-%m-%d %H:%M}~ ({days}일) | "
+                     f"라이브 {len(live)}건 / 리플레이 {len(rep)}건 | 시드 {seed_label}")
+        if anchor_changed:
+            lines.append("ℹ️ 설정 변경 감지: 리플레이 기준점 자동 갱신")
 
         # ① 신호 패리티 — 불일치 각 건을 그 시각 라이브 북 복원 + 엔진 게이트 체인으로
         #    사유 분류. 전부 경로분기(양성)면 WARN 억제, '미상'이 하나라도 있으면 WARN.
@@ -555,14 +713,14 @@ def main() -> None:
             gcfg = _gate_cfg(p)
             corr_cache = _CorrCache(gcfg["corr_lookback"])
             timing = _timing_pairs(rep_only, live_only)
-            ev_lines, unexplained = [], 0
+            ev_lines, rep_unexplained, live_unexplained = [], 0, 0
             for rr in rep_only:
                 pair = timing.get(id(rr))
                 if pair is not None:
                     reason, benign = f"타이밍시프트(라이브 {pair} 진입)", True
                 else:
                     reason, benign = classify_miss(rr, history, corr_cache, gcfg)
-                unexplained += 0 if benign else 1
+                rep_unexplained += 0 if benign else 1
                 if not benign:
                     active_alerts.add(
                         f"parity:{rr['symbol']}:{rr['direction']}:{rr['strategy']}:"
@@ -572,17 +730,29 @@ def main() -> None:
                                 f"{rr['strategy']} @{rr['entry_time']:%m-%d %H:%M} → {reason}")
             for lr in live_only:
                 pair = timing.get(id(lr))
-                reason = (f"타이밍시프트(리플레이 {pair} 진입)" if pair is not None
-                          else "경로분기(리플레이 미발생)")
+                benign = pair is not None
+                reason = (f"타이밍시프트(리플레이 {pair} 진입)" if benign
+                          else "미상(리플레이 신호 미발생)")
+                if not benign:
+                    live_unexplained += 1
+                    active_alerts.add(
+                        f"live_only:{lr['symbol']}:{lr['direction']}:{lr['strategy']}:"
+                        f"{lr['entry_time'].isoformat()}"
+                    )
                 ev_lines.append(f"① 라이브 전용: {lr['symbol']} {lr['direction']} "
                                 f"{lr['strategy']} @{lr['entry_time']:%m-%d %H:%M} → {reason}")
+            unexplained = rep_unexplained + live_unexplained
             if unexplained:
                 severity = "WARN"
-            benign_cnt = len(rep_only) - unexplained
+            benign_cnt = len(rep_only) - rep_unexplained
             lines.append(f"① 패리티: 미체결 {len(rep_only)}건(경로분기 {benign_cnt}/"
-                         f"미상 {unexplained}) · 라이브전용 {len(live_only)}건"
+                         f"미상 {rep_unexplained}) · 라이브전용 {len(live_only)}건"
+                         f"(미상 {live_unexplained})"
                          + (" ⚠️미상 점검필요" if unexplained else " ✓경로분기"))
-            lines.extend(ev_lines)
+            max_details = 30
+            lines.extend(ev_lines[:max_details])
+            if len(ev_lines) > max_details:
+                lines.append(f"① 상세 {len(ev_lines) - max_details}건 생략 (콘솔 로그 확인)")
         else:
             lines.append(f"① 신호 패리티: {len(matched)}/{len(matched)} 일치 ✓")
 
@@ -605,7 +775,10 @@ def main() -> None:
                          f"최대 {mx:+.1f}bps (가정 5bps){note}")
 
         # ③ 엣지부패
-        roll = rolling_percentiles()
+        roll, baseline_alerts = rolling_percentiles(config_path=config_path)
+        active_alerts.update(baseline_alerts)
+        if baseline_alerts:
+            severity = "WARN" if severity == "OK" else severity
         if any("ALERT" in s for s in roll):
             severity = "ALERT"
             for s in roll:
@@ -618,16 +791,24 @@ def main() -> None:
         print(body)
         is_monday = pd.Timestamp.now(tz="UTC").weekday() == 0
         should_notify = should_notify_alert_transition(
-            active_alerts, is_monday=is_monday, force=args.force_notify,
+            active_alerts, is_monday=is_monday, force=args.force_notify, persist=False,
         )
-        if notifier.enabled and should_notify:
-            notifier.notify_info(body)
-            time.sleep(1)
+        if should_notify:
+            if notifier.enabled and notifier.send_and_wait(body, timeout=30):
+                save_alert_state(active_alerts)
+            elif notifier.enabled:
+                logger.error("edge 경보 Telegram 전달 실패 — 상태 미확정, 다음 실행에서 재시도")
+            else:
+                logger.warning("edge 경보 전송 필요하지만 Telegram 비활성 — 상태 미확정")
+        else:
+            save_alert_state(active_alerts)
     except Exception as e:
         logger.exception("edge_monitor 실패")
         if notifier.enabled:
-            notifier.notify_info(f"🔧 edge_monitor 실행 실패: {type(e).__name__}: {str(e)[:200]}")
-            time.sleep(1)
+            notifier.send_and_wait(
+                f"🔧 edge_monitor 실행 실패: {type(e).__name__}: {str(e)[:200]}",
+                timeout=30,
+            )
         sys.exit(1)
 
 

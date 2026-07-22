@@ -1,12 +1,13 @@
-"""엣지부패 모니터 베이스라인 생성 (로컬 1회 실행).
+"""엣지부패 모니터 베이스라인 생성 (설정 버전별 로컬 1회 실행).
 
-v17 전구간 백테 equity curve(1h)에서 롤링 30d/90d 수익률 분포를 추출해
-percentile 그리드(p0~p100)를 config/edge_baseline_v17.json에 저장.
+전구간 백테 equity curve(1h)에서 롤링 30d/90d 수익률 분포를 추출해
+percentile 그리드(p0~p100)와 설정 hash를 JSON에 저장.
 edge_monitor.py가 라이브 롤링 수익률의 백분위를 이 그리드로 보간 산출.
 """
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 from pathlib import Path
 
@@ -53,6 +54,7 @@ for name, w in WINDOWS.items():
 
 out = {
     "config": CONFIG,
+    "config_sha256": hashlib.sha256(Path(CONFIG).read_bytes()).hexdigest(),
     "period": [str(since.date()), str(until.date()) if until is not None else None],
     "final_equity": float(eq.iloc[-1]),
     "grids": grids,

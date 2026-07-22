@@ -126,46 +126,6 @@ class PortfolioTracker:
         # ledger용 realized_pnl: 전체 비용(진입+청산+펀딩) 모두 포함
         realized_pnl = raw_pnl - pos.entry_commission - pos.entry_slippage - exit_cost - pos.funding_paid
 
-        if self.notifier is not None and getattr(self.notifier, "enabled", False):
-            try:
-                approx_equity = self.state.cash + sum(
-                    p.unrealized_pnl for p in self.state.positions.values()
-                )
-                score = confluence_score
-                if score >= 6:
-                    tier = "SSS"
-                elif score >= 5:
-                    tier = "SS"
-                elif score >= 4:
-                    tier = "S"
-                else:
-                    tier = "A"
-                # 진입 슬리피지% = (실제체결가 - 의도가)/의도가, 불리한 방향이 +
-                slip_pct = None
-                if pos.order_price > 0:
-                    raw_slip = (pos.entry_price - pos.order_price) / pos.order_price * 100
-                    slip_pct = raw_slip if pos.direction == "long" else -raw_slip
-                self.notifier.notify_exit(
-                    symbol=symbol,
-                    direction=pos.direction,
-                    entry_price=pos.entry_price,
-                    exit_price=exit_price,
-                    size_usd=pos.size_usd,
-                    leverage=pos.leverage,
-                    pnl=realized_pnl,
-                    exit_reason=exit_reason,
-                    entry_time=pos.opened_at,
-                    exit_time=exit_time,
-                    equity=approx_equity,
-                    strategy=pos.strategy,
-                    tier=tier,
-                    score=score,
-                    entry_slip_pct=slip_pct,
-                    commission=pos.entry_commission + commission,
-                )
-            except Exception:
-                pass
-
         record = TradeRecord(
             trade_id=self.ledger.next_id,
             symbol=symbol,
@@ -186,7 +146,53 @@ class PortfolioTracker:
             confluence_score=confluence_score,
             order_price=pos.order_price,
         )
+        # 거래 원장이 알림보다 우선이다. 알림 포맷/네트워크 오류가 기록을 누락시키면 안 된다.
         self.ledger.append(record)
+
+        if self.notifier is not None and getattr(self.notifier, "enabled", False):
+            try:
+                approx_equity = self.state.cash + sum(
+                    p.unrealized_pnl for p in self.state.positions.values()
+                )
+                score = confluence_score
+                if score >= 6:
+                    tier = "SSS"
+                elif score >= 5:
+                    tier = "SS"
+                elif score >= 4:
+                    tier = "S"
+                else:
+                    tier = "A"
+                # 진입 슬리피지% = (실제체결가 - 의도가)/의도가, 불리한 방향이 +
+                slip_pct = None
+                if pos.order_price > 0:
+                    raw_slip = (pos.entry_price - pos.order_price) / pos.order_price * 100
+                    slip_pct = raw_slip if pos.direction == "long" else -raw_slip
+                records = self.ledger.records
+                wins = sum(1 for r in records if r.pnl > 0)
+                self.notifier.notify_exit(
+                    symbol=symbol,
+                    direction=pos.direction,
+                    entry_price=pos.entry_price,
+                    exit_price=exit_price,
+                    size_usd=pos.size_usd,
+                    leverage=pos.leverage,
+                    pnl=realized_pnl,
+                    exit_reason=exit_reason,
+                    entry_time=pos.opened_at,
+                    exit_time=exit_time,
+                    equity=approx_equity,
+                    strategy=pos.strategy,
+                    tier=tier,
+                    score=score,
+                    entry_slip_pct=slip_pct,
+                    commission=pos.entry_commission + commission,
+                    cum_trades=len(records),
+                    cum_wr=(wins / len(records) * 100 if records else 0.0),
+                    cum_pnl=sum(r.pnl for r in records),
+                )
+            except Exception as e:
+                logger.warning("청산 알림 생성 실패(%s): %s", symbol, e)
         hold_h = (exit_time - pos.opened_at).total_seconds() / 3600
         logger.info(
             "EXIT  %s %s %s | %.4f→%.4f | PnL $%+.2f (%+.1f%%) | %s %.0fh",

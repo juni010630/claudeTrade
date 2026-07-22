@@ -88,8 +88,9 @@ def main() -> None:
     if failed:
         msg += f"\n실패 {len(failed)}개: {', '.join(failed)} — 수동 확인 필요!"
     notifier = TelegramNotifier.from_env()
-    notifier.send(msg)
-    print(f"\n완료: 청산 {len(closed)} / 실패 {len(failed)} (텔레그램 전송됨)")
+    delivered = notifier.send_and_wait(msg, timeout=30) if notifier.enabled else False
+    delivery_text = "텔레그램 전송됨" if delivered else "텔레그램 미전송"
+    print(f"\n완료: 청산 {len(closed)} / 실패 {len(failed)} ({delivery_text})")
     if failed:
         sys.exit(1)
 
