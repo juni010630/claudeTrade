@@ -178,6 +178,100 @@ class LiveBroker:
         except Exception as e:
             logger.warning("SL 실패 경보 전송 실패: %s", e)
 
+    @staticmethod
+    def _positive_float(value) -> float:
+        try:
+            parsed = float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return parsed if parsed > 0 else 0.0
+
+    def _resolve_market_fill(
+        self,
+        symbol: str,
+        response: dict,
+        intended_qty: float,
+        fallback_price: float,
+    ) -> dict:
+        """시장가 주문의 실제 체결 수량·평단을 거래소에서 확정한다.
+
+        Binance futures의 create_order 응답은 주문이 체결됐어도 average/price가
+        비어 있을 수 있다. 그 값을 신호가로 대체하면 tracker와 거래소 평단이
+        어긋나 다음 기동 검증이 실패하므로, 주문 재조회 후 체결내역까지 확인한다.
+        조회가 모두 실패할 때만 보호주문 등록을 위해 기존 폴백을 유지한다.
+        """
+        resolved = dict(response or {})
+        avg = self._positive_float(resolved.get("average") or resolved.get("price"))
+        filled = self._positive_float(resolved.get("filled"))
+        if avg > 0 and filled > 0:
+            return resolved
+
+        oid = resolved.get("id")
+        last_err = None
+        if oid:
+            for delay in (0.0, 0.25, 0.5, 1.0):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    fetched = self.exchange.fetch_order(oid, symbol)
+                    fetched_avg = self._positive_float(
+                        fetched.get("average") or fetched.get("price")
+                    )
+                    fetched_qty = self._positive_float(fetched.get("filled"))
+                    if fetched_avg > 0:
+                        avg = fetched_avg
+                    if fetched_qty > 0:
+                        filled = fetched_qty
+                    if not resolved.get("fee") and fetched.get("fee"):
+                        resolved["fee"] = fetched["fee"]
+                    if avg > 0 and filled > 0:
+                        break
+                except Exception as e:
+                    last_err = e
+
+        # 주문 재조회가 일시적으로 비어 있으면 동일 order id의 개별 체결을
+        # 합산한다. 다른 주문 체결은 절대 섞지 않는다.
+        if oid and (avg <= 0 or filled <= 0):
+            try:
+                trades = self.exchange.fetch_my_trades(symbol, limit=100)
+                matched = [
+                    t for t in trades
+                    if str(t.get("order")) == str(oid)
+                ]
+                trade_qty = sum(
+                    self._positive_float(t.get("amount")) for t in matched
+                )
+                trade_cost = sum(
+                    self._positive_float(t.get("amount"))
+                    * self._positive_float(t.get("price"))
+                    for t in matched
+                )
+                if trade_qty > 0 and trade_cost > 0:
+                    filled = trade_qty
+                    avg = trade_cost / trade_qty
+            except Exception as e:
+                last_err = e
+
+        if filled <= 0:
+            filled = float(intended_qty)
+        if avg <= 0:
+            avg = float(fallback_price)
+            logger.error(
+                "시장가 실제 체결가 확정 실패 — 보호주문 우선 폴백: %s order=%s @%.6g"
+                " (%s)",
+                symbol, oid, avg,
+                f"{type(last_err).__name__}: {last_err}" if last_err else "응답 값 없음",
+            )
+        else:
+            logger.info(
+                "시장가 실제 체결 확정: %s order=%s qty=%.6f @%.8g",
+                symbol, oid, filled, avg,
+            )
+
+        resolved["average"] = avg
+        resolved["filled"] = filled
+        return resolved
+
     # ── maker-first 진입 (post-only 지정가 + 타임아웃 + 시장가 추격) ────
     def _try_maker_entry(self, symbol: str, side: str, qty: float, limit_price: float):
         """시그널가 post-only 지정가 → timeout 내 미체결 잔량 시장가 추격.
@@ -260,6 +354,9 @@ class LiveBroker:
                 return {"average": avg, "qty": filled} if filled > 0 else None
             chased = True
             res = self.exchange.create_order(symbol, "market", side, remain_p)
+            res = self._resolve_market_fill(
+                symbol, res, intended_qty=remain_p, fallback_price=limit_price,
+            )
             mkt_px = float(res.get("average") or res.get("price") or limit_price)
             mkt_qty = float(res.get("filled") or remain_p)
             total = filled + mkt_qty
@@ -446,6 +543,9 @@ class LiveBroker:
             for _attempt in range(3):
                 try:
                     result = self.exchange.create_order(symbol, "market", side, qty)
+                    result = self._resolve_market_fill(
+                        symbol, result, intended_qty=float(qty), fallback_price=float(price),
+                    )
                     break
                 except ccxt.InsufficientFunds as e:
                     logger.error("잔고 부족: %s", e)

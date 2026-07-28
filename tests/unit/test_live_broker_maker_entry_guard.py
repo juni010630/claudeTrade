@@ -17,9 +17,11 @@ from execution.models import Order, OrderSide, OrderType
 
 class _FakeExchange:
     def __init__(self, *, cancel_fails=False, market_raises=False,
-                 position_after=None):
+                 position_after=None, market_fill_after=None):
         self.cancel_fails = cancel_fails      # cancel_order/cancel_all 전부 실패
         self.market_raises = market_raises    # 시장가 create_order 응답 유실
+        # create_order 응답에는 평단이 없고 fetch_order에만 (qty, avg)가 있는 경우
+        self.market_fill_after = market_fill_after
         # fetch_positions가 보고할 (contracts, entryPrice) — None이면 무포지션
         self.position_after = position_after
         self.orders = []                      # 접수 성공한 (type, side, qty)
@@ -43,10 +45,17 @@ class _FakeExchange:
             self.market_attempts += 1
             if self.market_raises:
                 raise ccxt.NetworkError("response lost")
+            if self.market_fill_after is not None:
+                self.orders.append((type_, side, float(qty)))
+                return {"id": "mkt1", "average": None, "price": None,
+                        "filled": float(qty)}
         self.orders.append((type_, side, float(qty)))
         return {"id": "oid1", "average": 100.0, "filled": float(qty)}
 
     def fetch_order(self, oid, symbol):
+        if oid == "mkt1":
+            qty, avg = self.market_fill_after
+            return {"status": "closed", "filled": qty, "average": avg}
         status = "canceled" if self._canceled else "open"
         return {"status": status, "filled": 0.0, "average": None}
 
@@ -119,3 +128,26 @@ def test_normal_timeout_chase_still_works():
     (mkt,) = _markets(ex)
     assert mkt[2] == pytest.approx(5.0)
     assert fill.fill_price == pytest.approx(100.0)
+
+
+def test_timeout_chase_requeries_missing_market_average():
+    """Binance 시장가 응답의 평단이 비어도 주문 재조회 실체결가를 기록한다."""
+    ex = _FakeExchange(market_fill_after=(5.0, 101.0))
+    fill = _broker(ex).submit(_order())
+
+    assert fill.fill_price == pytest.approx(101.0)
+    assert fill.order.size_usd == pytest.approx(505.0)
+    # 신호가 대비 +1 체결 슬리피지를 보호가격에도 동일하게 반영한다.
+    assert fill.order.tp_price == pytest.approx(111.0)
+    assert fill.order.sl_price == pytest.approx(96.0)
+
+
+def test_direct_market_requeries_missing_market_average():
+    """maker 비활성 순수 시장가 경로에도 같은 체결가 확정을 적용한다."""
+    ex = _FakeExchange(market_fill_after=(5.0, 101.0))
+    broker = LiveBroker(exchange=ex, dry_run=False, maker_timeout_sec=0.0)
+    fill = broker.submit(_order())
+
+    assert ex.market_attempts == 1
+    assert fill.fill_price == pytest.approx(101.0)
+    assert fill.order.size_usd == pytest.approx(505.0)
