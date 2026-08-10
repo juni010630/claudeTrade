@@ -27,12 +27,16 @@ class DataLoader:
         primary_tf: str = "1h",
         cache_dir: str | Path = "data/cache",
         lookback: int = 300,  # 각 타임스탬프에서 제공할 과거 봉 수
+        funding_history_symbols: list[str] | None = None,
+        funding_history_lookback: int = 180,
     ) -> None:
         self.symbols = symbols
         self.timeframes = timeframes
         self.primary_tf = primary_tf
         self.cache = ParquetCache(cache_dir)
         self.lookback = lookback
+        self.funding_history_symbols = set(funding_history_symbols or ())
+        self.funding_history_lookback = int(funding_history_lookback)
 
         # 전체 데이터 로드
         self._ohlcv: dict[str, dict[str, pd.DataFrame]] = {}
@@ -177,6 +181,7 @@ class DataLoader:
 
             funding_rates: dict[str, float] = {}
             funding_ts: dict[str, pd.Timestamp] = {}
+            funding_history: dict[str, pd.DataFrame] = {}
             for sym in self.symbols:
                 fd = self._funding[sym]
                 if not fd.empty:
@@ -189,11 +194,17 @@ class DataLoader:
                 else:
                     funding_rates[sym] = 0.0
 
+                if sym in self.funding_history_symbols and not fd.empty:
+                    fend = int(np.searchsorted(self._fund_i8[sym], eff_i8, side="right"))
+                    fstart = max(0, fend - self.funding_history_lookback)
+                    funding_history[sym] = fd.iloc[fstart:fend].reset_index()
+
             yield MarketSnapshot(
                 timestamp=effective_time,  # close time 기준 (LiveFeed와 일치)
                 bars=bars,
                 funding_rates=funding_rates,
                 funding_ts=funding_ts,
+                funding_history=funding_history,
                 open_interest={},   # 필요 시 별도 캐시에서 로드
                 btc_dominance=0.0,
             )

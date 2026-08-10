@@ -33,12 +33,18 @@ class LiveFeed:
         exchange_id: str = "binanceusdm",
         demo: bool = True,
         notifier=None,
+        funding_history_symbols: list[str] | None = None,
+        funding_history_lookback: int = 180,
     ) -> None:
         self.symbols    = symbols
         self.timeframes = timeframes
         self.primary_tf = primary_tf
         self.lookback   = lookback
         self.notifier   = notifier
+        self.funding_history_symbols = set(funding_history_symbols or ())
+        self.funding_history_lookback = int(funding_history_lookback)
+        self._funding_history: dict[str, pd.DataFrame] = {}
+        self._funding_history_seeded: set[str] = set()
 
         self.exchange: ccxt.Exchange = getattr(ccxt, exchange_id)(
             {"enableRateLimit": True}
@@ -127,12 +133,72 @@ class LiveFeed:
         except Exception:
             return 0.0, None
 
+    def _seed_funding_history(self, symbol: str) -> pd.DataFrame:
+        """확정 정산 이력만 1회 로드. 실패 시 빈 이력을 반환해 D를 no-op 처리한다."""
+        if symbol in self._funding_history_seeded:
+            return self._funding_history.get(
+                symbol, pd.DataFrame(columns=["timestamp", "rate"])
+            )
+        rows = []
+        fetched = False
+        try:
+            raw = self.exchange.fetch_funding_rate_history(
+                symbol, limit=max(self.funding_history_lookback, 90)
+            )
+            fetched = True
+            for item in raw or ():
+                ms = item.get("timestamp")
+                if ms is None:
+                    continue
+                rows.append({
+                    "timestamp": pd.Timestamp(ms, unit="ms", tz="UTC"),
+                    "rate": float(item.get("fundingRate") or 0.0),
+                })
+        except Exception as error:
+            logger.warning("Candidate D 펀딩 이력 로드 실패 %s: %s", symbol, error)
+        history = pd.DataFrame(rows, columns=["timestamp", "rate"])
+        existing = self._funding_history.get(symbol)
+        if existing is not None and not existing.empty:
+            history = pd.concat([existing, history], ignore_index=True)
+        if not history.empty:
+            history = (
+                history.drop_duplicates("timestamp", keep="last")
+                .sort_values("timestamp")
+                .tail(self.funding_history_lookback)
+                .reset_index(drop=True)
+            )
+        self._funding_history[symbol] = history
+        if fetched:
+            self._funding_history_seeded.add(symbol)
+        return history
+
+    def _update_funding_history(
+        self, symbol: str, rate: float, timestamp: pd.Timestamp | None,
+    ) -> None:
+        history = self._seed_funding_history(symbol)
+        if timestamp is None:
+            return  # 차기 정산 예측치는 확정 이력에 섞지 않는다.
+        timestamp = pd.Timestamp(timestamp)
+        timestamp = (
+            timestamp.tz_localize("UTC") if timestamp.tzinfo is None
+            else timestamp.tz_convert("UTC")
+        )
+        addition = pd.DataFrame([{"timestamp": timestamp, "rate": float(rate)}])
+        self._funding_history[symbol] = (
+            pd.concat([history, addition], ignore_index=True)
+            .drop_duplicates("timestamp", keep="last")
+            .sort_values("timestamp")
+            .tail(self.funding_history_lookback)
+            .reset_index(drop=True)
+        )
+
     # ── 현재 스냅샷 즉시 생성 ─────────────────────────────────────────
     def snapshot_now(self) -> MarketSnapshot:
         """지금 당장 MarketSnapshot 을 만들어 반환."""
         bars: dict[str, dict[str, pd.DataFrame]] = {}
         funding: dict[str, float] = {}
         funding_ts: dict[str, pd.Timestamp] = {}
+        funding_history: dict[str, pd.DataFrame] = {}
         pf_closes: dict[str, pd.Timestamp] = {}  # 심볼별 primary 최신 완성봉 close
 
         for sym in self.symbols:
@@ -160,6 +226,8 @@ class LiveFeed:
             funding[sym], _fts = self._fetch_funding(sym)
             if _fts is not None:
                 funding_ts[sym] = _fts
+            if sym in self.funding_history_symbols:
+                self._update_funding_history(sym, funding[sym], _fts)
             time.sleep(self.exchange.rateLimit / 1000 * 0.5)
 
         # 타임스탬프 앵커 = 전 심볼 primary 완성봉 close의 최대값.
@@ -219,11 +287,20 @@ class LiveFeed:
                 f"{self.TF_MINS.get(self.primary_tf, 60)}min"
             )
 
+        # evaluator에 스냅샷 시각 이후의 정산 행은 전달하지 않는다.
+        for sym in self.funding_history_symbols:
+            history = self._funding_history.get(sym)
+            if history is not None and not history.empty:
+                funding_history[sym] = history.loc[
+                    pd.to_datetime(history["timestamp"], utc=True) <= snap_ts
+                ].copy()
+
         return MarketSnapshot(
             timestamp=snap_ts,
             bars=bars,
             funding_rates=funding,
             funding_ts=funding_ts,
+            funding_history=funding_history,
             open_interest={},
             btc_dominance=0.0,
         )

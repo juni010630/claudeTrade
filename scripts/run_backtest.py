@@ -353,12 +353,19 @@ def main() -> None:
     until = pd.Timestamp(until_str, tz="UTC") if until_str else None
 
     data_cfg = p.get("data", {})
+    d_cfg = p.get("strategies", {}).get("multi_tf_breakout", {}).get("candidate_d", {})
+    d_symbols = (
+        p.get("strategies", {}).get("multi_tf_breakout", {}).get("symbols", [])
+        if d_cfg.get("enabled", False) else []
+    )
     loader = DataLoader(
         symbols=p["symbols"],
         timeframes=p["timeframes"],
         primary_tf=p.get("primary_timeframe", "1h"),
         cache_dir=data_cfg.get("cache_dir", "data/cache"),
         lookback=data_cfg.get("lookback_bars", 300),
+        funding_history_symbols=d_symbols,
+        funding_history_lookback=d_cfg.get("funding_window", 180),
     )
 
     engine = build_engine(p, initial_capital, abort_mdd=args.abort_mdd,

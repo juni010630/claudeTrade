@@ -16,6 +16,7 @@ TP/SL: ATR 기반
 """
 from __future__ import annotations
 
+import logging
 import pandas as pd
 
 from data.schemas import MarketSnapshot
@@ -24,7 +25,10 @@ from indicators.trend import atr as calc_atr, ema as calc_ema
 from indicators.volatility import bollinger_bands
 from regime.models import MarketRegime, RegimeState
 from signals.models import Signal
+from signals.candidate_d import CandidateDConfig, evaluate_candidate_d
 from strategies.base import BaseStrategy
+
+logger = logging.getLogger(__name__)
 
 
 class MultiTFBreakoutStrategy(BaseStrategy):
@@ -47,6 +51,12 @@ class MultiTFBreakoutStrategy(BaseStrategy):
         self.signal_tf: str = cfg.get("signal_tf", "1h")
         self.confirm_tf: str = cfg.get("confirm_tf", "4h")
         self.filter_tf: str = cfg.get("filter_tf", "1d")
+        self.candidate_d = CandidateDConfig(**cfg.get("candidate_d", {}))
+        if self.candidate_d.enabled:
+            logger.info(
+                "Candidate D 활성: market_TRI<%.1f and funding_z>%.1f",
+                self.candidate_d.market_tri_max, self.candidate_d.funding_z_max,
+            )
         # 펀딩 레짐 게이트(기본 off): 펀딩-z > funding_z_max 인 돌파(양방향) 스킵.
         # 돌파는 펀딩 낮은 레짐(고변동/추세)서 작동, 높은 레짐(안일)서 실패 — 진입 필터.
         # funding-z는 scripts/precompute_funding_z.py 산출물. 캐시 없으면 no-op(라이브 안전).
@@ -152,7 +162,28 @@ class MultiTFBreakoutStrategy(BaseStrategy):
                         if fz is not None and fz > self.funding_z_max:
                             continue
 
+                direction = None
                 if bull_4h and prev_close <= prev_upper and curr_close > curr_upper and vol_ok:
+                    direction = "long"
+                elif bear_4h and prev_close >= prev_lower and curr_close < curr_lower and vol_ok:
+                    direction = "short"
+
+                if direction is not None and self.candidate_d.enabled:
+                    decision = evaluate_candidate_d(snapshot, sym, self.candidate_d)
+                    if decision["would_block"]:
+                        logger.warning(
+                            "Candidate D 진입 차단: %s %s ts=%s TRI=%.3f funding_z=%.3f",
+                            sym, direction, snapshot.timestamp,
+                            decision["market_tri"], decision["funding_z"],
+                        )
+                        continue
+                    if not decision["valid"]:
+                        logger.warning(
+                            "Candidate D 판정 불가(no-op): %s %s ts=%s reason=%s",
+                            sym, direction, snapshot.timestamp, decision["reason"],
+                        )
+
+                if direction == "long":
                     entry = curr_close
                     signals.append(Signal(
                         symbol=sym, strategy=self.name, direction="long",
@@ -161,7 +192,7 @@ class MultiTFBreakoutStrategy(BaseStrategy):
                         sl_price=entry - curr_atr * self.atr_sl_mult,
                         timestamp=snapshot.timestamp,
                     ))
-                elif bear_4h and prev_close >= prev_lower and curr_close < curr_lower and vol_ok:
+                elif direction == "short":
                     entry = curr_close
                     signals.append(Signal(
                         symbol=sym, strategy=self.name, direction="short",

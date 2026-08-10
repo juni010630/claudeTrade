@@ -34,3 +34,6 @@ class MarketSnapshot:
     funding_ts: dict[str, pd.Timestamp] = field(default_factory=dict)  # symbol → 직전 정산 시각 (정산 발생 감지용)
     open_interest: dict[str, float] = field(default_factory=dict)   # symbol → OI (USD)
     btc_dominance: float = 0.0
+    # Candidate D가 요청한 확정 펀딩 이력. 기존 positional 생성자 호환성을
+    # 유지하기 위해 마지막 필드로 둔다.
+    funding_history: dict[str, pd.DataFrame] = field(default_factory=dict)

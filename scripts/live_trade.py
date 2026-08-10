@@ -415,6 +415,11 @@ def main() -> None:
     # 백테(run_backtest)는 p["timeframes"]를 필수 키로 사용 → 라이브도 동일하게 필수.
     # 기본값을 두면 config 누락 시 백테와 다른 TF로 조용히 동작(패리티 깨짐).
     timeframes = params["timeframes"]
+    d_cfg = params.get("strategies", {}).get("multi_tf_breakout", {}).get("candidate_d", {})
+    d_symbols = (
+        params.get("strategies", {}).get("multi_tf_breakout", {}).get("symbols", [])
+        if d_cfg.get("enabled", False) else []
+    )
     feed = LiveFeed(
         symbols=symbols,
         timeframes=timeframes,
@@ -422,6 +427,8 @@ def main() -> None:
         lookback=params.get("data", {}).get("lookback_bars", 300),
         demo=demo,
         notifier=notifier,
+        funding_history_symbols=d_symbols,
+        funding_history_lookback=d_cfg.get("funding_window", 180),
     )
 
     logger.info("=" * 60)

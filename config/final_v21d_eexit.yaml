@@ -152,6 +152,15 @@ strategies:
     - ADAUSDT
     early_exit_on_opp: true
   multi_tf_breakout:
+    candidate_d:
+      enabled: true
+      market_tri_max: 35.0
+      funding_z_max: 0.5
+      funding_window: 180
+      funding_min_periods: 90
+      max_daily_age_hours: 26.0
+      max_funding_age_hours: 12.0
+      max_funding_gap_hours: 24.0
     atr_period: 14
     atr_sl_mult: 2.1
     atr_tp_mult: 4.0
